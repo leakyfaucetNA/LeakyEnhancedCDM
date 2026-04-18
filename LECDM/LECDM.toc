@@ -1,0 +1,25 @@
+## Interface: 120000, 120001
+## Title: Leaky EnhancedCDM
+## Notes: Enhancements to any CDM Module for glows, sounds and more.
+## Author: Leaky-BleedingHollow
+## Version: 0.6.0
+## SavedVariables: LECDMdb
+## OptionalDeps: Ace3, LibCustomGlow-1.0, Masque
+
+# Libraries
+embeds.xml
+
+
+# Modules
+modules\maps.lua
+modules\auras.lua
+modules\cooldowns.lua
+modules\events.lua
+modules\glows.lua
+modules\sounds.lua
+
+# Settings
+settings\settings.lua
+
+# Core
+main.lua
