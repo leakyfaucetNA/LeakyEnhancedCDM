@@ -147,7 +147,11 @@ end
 -- Closes on: item click, owner re-click, or click outside (via clickCatcher).
 -- Mouseover-based close was dropped because the 2px gap between owner and popup
 -- briefly has the mouse over neither frame, triggering an instant close.
-local dropPopup, clickCatcher
+-- Scrolls when items exceed DROP_VISIBLE_ROWS.
+local DROP_ROW_H        = 22
+local DROP_VISIBLE_ROWS = 13
+
+local dropPopup, dropScroll, dropScrollChild, clickCatcher
 local function GetDropPopup()
     if dropPopup then return dropPopup end
 
@@ -171,6 +175,21 @@ local function GetDropPopup()
     dropPopup.rows = {}
     dropPopup:SetScript("OnShow", function() clickCatcher:Show() end)
     dropPopup:SetScript("OnHide", function() clickCatcher:Hide() end)
+
+    dropScroll = CreateFrame("ScrollFrame", nil, dropPopup)
+    dropScroll:SetPoint("TOPLEFT",     dropPopup, "TOPLEFT",      1,  -1)
+    dropScroll:SetPoint("BOTTOMRIGHT", dropPopup, "BOTTOMRIGHT", -1,   1)
+    dropScroll:EnableMouseWheel(true)
+    dropScroll:SetScript("OnMouseWheel", function(self, delta)
+        local maxScroll = math.max(0, (dropScrollChild:GetHeight() or 0) - (self:GetHeight() or 0))
+        local new = math.max(0, math.min(maxScroll, (self:GetVerticalScroll() or 0) - delta * DROP_ROW_H))
+        self:SetVerticalScroll(new)
+    end)
+
+    dropScrollChild = CreateFrame("Frame", nil, dropScroll)
+    dropScrollChild:SetSize(1, 1)
+    dropScroll:SetScrollChild(dropScrollChild)
+
     return dropPopup
 end
 
@@ -183,7 +202,7 @@ local function ShowDropdown(owner, items, onPick)
     for i, it in ipairs(items) do
         local row = pop.rows[i]
         if not row then
-            row = CreateFrame("Button", nil, pop, "BackdropTemplate")
+            row = CreateFrame("Button", nil, dropScrollChild, "BackdropTemplate")
             SetBD(row, C_PANEL, C_PANEL)
             row.text = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
             row.text:SetPoint("LEFT", 8, 0)
@@ -191,8 +210,9 @@ local function ShowDropdown(owner, items, onPick)
             row:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(C_PANEL)) end)
             pop.rows[i] = row
         end
-        row:SetSize(rowW, 22)
-        row:SetPoint("TOPLEFT", 0, -(i - 1) * 22)
+        row:SetSize(rowW, DROP_ROW_H)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -(i - 1) * DROP_ROW_H)
         row.text:SetText(it.label)
         row.text:SetTextColor(unpack(C_TEXT))
         row:SetScript("OnClick", function()
@@ -201,7 +221,11 @@ local function ShowDropdown(owner, items, onPick)
         end)
         row:Show()
     end
-    pop:SetSize(rowW, #items * 22 + 2)
+
+    local visible = math.min(#items, DROP_VISIBLE_ROWS)
+    pop:SetSize(rowW + 2, visible * DROP_ROW_H + 2)
+    dropScrollChild:SetSize(rowW, #items * DROP_ROW_H)
+    dropScroll:SetVerticalScroll(0)
     pop:ClearAllPoints()
     pop:SetPoint("TOPLEFT", owner, "BOTTOMLEFT", 0, -2)
     pop:Show()
@@ -339,7 +363,7 @@ end
 local FRAMELEVEL_LABELS = { "Low (20)", "Normal (60)", "High (100)" }
 local FRAMELEVEL_VALS   = { 20, 60, 100 }
 local GLOW_TYPES        = { "Pixel", "AutoCast", "Proc", "Button" }
-local CHANNELS          = { "Master", "SFX", "Music", "Ambience" }
+local CHANNELS          = { "Master", "SFX", "Music", "Ambience", "Dialog" }
 local REPEAT_MODES      = { "once", "count", "loop" }
 
 local function AuraTriggers()
@@ -360,6 +384,11 @@ local function Row(parent, yOff, label)
     fs:SetJustifyH("LEFT")
     return fs
 end
+
+-- Forward-declared so option panels can request an accordion rebuild when a
+-- field change needs to show/hide dependent widgets (e.g. repeat count/interval
+-- only apply when repeat mode isn't "once").
+local BuildSubmoduleList
 
 -- Build glow options panel.
 local function CreateGlowPanel(parent, gc)
@@ -547,28 +576,38 @@ local function CreateSoundPanel(parent, sc)
     rm:SetScript("OnClick", function(s)
         local items = {}
         for _, m in ipairs(REPEAT_MODES) do table.insert(items, {label=m, value=m}) end
-        s:Open(items, function(v) sc.repeatMode = v; rm:SetValue(v); RefreshAll() end)
+        s:Open(items, function(v)
+            sc.repeatMode = v
+            rm:SetValue(v)
+            RefreshAll()
+            -- Rebuild so count/interval show or hide to match the new mode.
+            if BuildSubmoduleList then BuildSubmoduleList() end
+        end)
     end)
     y = y - 30
 
-    Row(p, y, "Count")
-    local cnt = MakeEdit(p, 60, 22)
-    cnt:SetPoint("TOPLEFT", PAD + 108, y + 4)
-    cnt.edit:SetNumeric(true)
-    cnt.edit:SetText(tostring(sc.repeatCount or 1))
-    cnt.edit:SetScript("OnEditFocusLost", function(e)
-        sc.repeatCount = tonumber(e:GetText()) or 1; RefreshAll()
-    end)
-    y = y - 30
+    -- Count and interval only apply when repeating — sounds.lua ignores them in
+    -- "once" mode, and cluttering the panel with disabled inputs isn't useful.
+    if (sc.repeatMode or "once") ~= "once" then
+        Row(p, y, "Count")
+        local cnt = MakeEdit(p, 60, 22)
+        cnt:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        cnt.edit:SetNumeric(true)
+        cnt.edit:SetText(tostring(sc.repeatCount or 1))
+        cnt.edit:SetScript("OnEditFocusLost", function(e)
+            sc.repeatCount = tonumber(e:GetText()) or 1; RefreshAll()
+        end)
+        y = y - 30
 
-    Row(p, y, "Interval (s)")
-    local iv = MakeEdit(p, 60, 22)
-    iv:SetPoint("TOPLEFT", PAD + 108, y + 4)
-    iv.edit:SetText(tostring(sc.repeatInterval or 1))
-    iv.edit:SetScript("OnEditFocusLost", function(e)
-        sc.repeatInterval = tonumber(e:GetText()) or 1; RefreshAll()
-    end)
-    y = y - 30
+        Row(p, y, "Interval (s)")
+        local iv = MakeEdit(p, 60, 22)
+        iv:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        iv.edit:SetText(tostring(sc.repeatInterval or 1))
+        iv.edit:SetScript("OnEditFocusLost", function(e)
+            sc.repeatInterval = tonumber(e:GetText()) or 1; RefreshAll()
+        end)
+        y = y - 30
+    end
 
     p:SetHeight(-y + PAD)
     return p
@@ -633,7 +672,7 @@ local function ClearRightContent()
     wipe(subRows); wipe(subPanels)
 end
 
-local function BuildSubmoduleList()
+function BuildSubmoduleList()
     ClearRightContent()
     if not selectedKey then return end
 
@@ -770,26 +809,57 @@ local function BuildSpellList()
     for _, r in ipairs(spellRows) do r:Hide() end
     wipe(spellRows)
 
-    local map = GetMap()
-    -- Map has the same entry under both the base name and override name (e.g.
-    -- "Word of Glory" and "Eternal Flame" point to one entry). Dedupe by table
-    -- reference and display whichever spell is currently active.
-    local seen = {}
     local sorted = {}
-    for _, entry in pairs(map) do
-        if entry._lecSpellID and not seen[entry] then
-            seen[entry] = true
-            local baseID     = entry._lecSpellID
-            local overrideID = C_Spell.GetOverrideSpell(baseID)
-            local activeID   = (overrideID and overrideID ~= 0) and overrideID or baseID
-            local info       = C_Spell.GetSpellInfo(activeID)
-            local label      = (info and info.name) or entry._lecName or ""
-            table.insert(sorted, {
-                key        = label,
-                entry      = entry,
-                activeID   = activeID,
-                configured = IsActive(baseID),
-            })
+
+    -- CDM frame maps are built for the currently-active spec only. If the user
+    -- is viewing a different spec in the settings UI, iterating those maps
+    -- would show the WRONG spec's offerings. For non-active specs, only show
+    -- spells already configured in the DB for that spec.
+    local activeIdx    = GetSpecialization()
+    local activeSpecID = activeIdx and GetSpecializationInfo(activeIdx) or nil
+    local isActiveSpec = (selectedSpecID == activeSpecID)
+
+    if isActiveSpec then
+        local map = GetMap()
+        -- Map has the same entry under both the base name and override name (e.g.
+        -- "Word of Glory" and "Eternal Flame" point to one entry). Dedupe by table
+        -- reference and display whichever spell is currently active.
+        local seen = {}
+        for _, entry in pairs(map) do
+            if entry._lecSpellID and not seen[entry] then
+                seen[entry] = true
+                local baseID     = entry._lecSpellID
+                local overrideID = C_Spell.GetOverrideSpell(baseID)
+                local activeID   = (overrideID and overrideID ~= 0) and overrideID or baseID
+                local info       = C_Spell.GetSpellInfo(activeID)
+                local label      = (info and info.name) or entry._lecName or ""
+                table.insert(sorted, {
+                    key        = label,
+                    entry      = entry,
+                    activeID   = activeID,
+                    configured = IsActive(baseID),
+                })
+            end
+        end
+    else
+        -- Non-active spec — pull configured items from the DB for that spec.
+        local itemType = GetItemType()
+        local seenIDs  = {}
+        for _, item in pairs(LECDM.db.profile.items) do
+            if item.type == itemType
+               and item.specID == selectedSpecID
+               and item.spellID and not seenIDs[item.spellID] then
+                seenIDs[item.spellID] = true
+                local baseID = item.spellID
+                local info   = C_Spell.GetSpellInfo(baseID)
+                local label  = (info and info.name) or item.name or ("Spell " .. baseID)
+                table.insert(sorted, {
+                    key        = label,
+                    entry      = { _lecSpellID = baseID, _lecName = label },
+                    activeID   = baseID,
+                    configured = item.enabled ~= false,
+                })
+            end
         end
     end
     -- Configured items first (alphabetical within each group)
@@ -975,17 +1045,28 @@ local function BuildFrame()
     catCDsBtn   = MakeButton(leftPanel, "CDs", 70, 22)
     catCDsBtn:SetPoint("LEFT", catAurasBtn, "RIGHT", 6, 0)
 
+    -- Paint a category button and rewrite its hover scripts to match the state.
+    -- MakeButton/MakeAccentButton bake in OnEnter/OnLeave that always restore
+    -- the same base color, so without rewriting them the deselected color wins
+    -- as soon as the mouse leaves the selected button.
+    local function setCatButtonState(btn, selected)
+        if selected then
+            btn:SetBackdropColor(unpack(C_ACCENT))
+            btn:SetScript("OnEnter", function(s) s:SetBackdropColor(0.55, 0.55, 1.0, 1) end)
+            btn:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(C_ACCENT)) end)
+        else
+            btn:SetBackdropColor(unpack(C_ELEM))
+            btn:SetScript("OnEnter", function(s) s:SetBackdropColor(unpack(C_HOVER)) end)
+            btn:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(C_ELEM)) end)
+        end
+    end
+
     local function setCat(cat)
         selectedCat = cat
         selectedKey = nil
         expandedUID = nil
-        if cat == "auras" then
-            catAurasBtn:SetBackdropColor(unpack(C_ACCENT))
-            catCDsBtn:SetBackdropColor(unpack(C_ELEM))
-        else
-            catAurasBtn:SetBackdropColor(unpack(C_ELEM))
-            catCDsBtn:SetBackdropColor(unpack(C_ACCENT))
-        end
+        setCatButtonState(catAurasBtn, cat == "auras")
+        setCatButtonState(catCDsBtn,   cat == "cds")
         BuildSpellList()
         BuildSubmoduleList()
         if rightHeader and rightHeader.Refresh then rightHeader.Refresh() end
