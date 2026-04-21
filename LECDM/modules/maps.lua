@@ -97,16 +97,35 @@ local function BuildCategoryMap(categories, dest)
     end
 end
 
+-- Snapshot .frame refs by spellID, wipe and rebuild metadata, then restore
+-- frame refs into the fresh entries. Without this, every SetupAddon cycle
+-- clears frame refs for auras that aren't currently displayed — SeedFrames
+-- only captures frames for live auras, so inactive-but-previously-seen auras
+-- have no .frame after a rebuild and anchor lookups for them fall back to
+-- UIParent.
+local function RebuildMap(dest, categories)
+    local framesByID = {}
+    for _, entry in pairs(dest) do
+        if entry._lecSpellID and entry.frame then
+            framesByID[entry._lecSpellID] = entry.frame
+        end
+    end
+    wipe(dest)
+    BuildCategoryMap(categories, dest)
+    for _, entry in pairs(dest) do
+        local f = framesByID[entry._lecSpellID]
+        if f then entry.frame = f end
+    end
+end
+
 function ns.BuildSpellMap()
     ns.lpmsg("Lifecycle: BuildSpellMap", "DEBUG")
-    wipe(ns.cdFrameMap)
-    BuildCategoryMap(COOLDOWN_CATEGORIES, ns.cdFrameMap)
+    RebuildMap(ns.cdFrameMap, COOLDOWN_CATEGORIES)
     ns.lpmsg("Lifecycle: BuildSpellMap done", "DEBUG")
 end
 
 function ns.BuildAuraMap()
     ns.lpmsg("Lifecycle: BuildAuraMap", "DEBUG")
-    wipe(ns.auraFrameMap)
-    BuildCategoryMap(AURA_CATEGORIES, ns.auraFrameMap)
+    RebuildMap(ns.auraFrameMap, AURA_CATEGORIES)
     ns.lpmsg("Lifecycle: BuildAuraMap done", "DEBUG")
 end

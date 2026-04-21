@@ -37,21 +37,55 @@ local textFrames = {}
 --  Font-string lifecycle                             --
 -- -------------------------------------------------- --
 
--- Resolve the anchor frame the way glows do: number = spellID → look up live
--- CDM frame; string = global frame name; nil/empty = UIParent. Anchoring a
--- UIParent-parented FontString to a CDM frame is safe (same pattern glow
--- overlays use — we never parent to the CDM frame, only SetPoint to it).
+local AURA_VIEWER_NAMES = { "BuffIconCooldownViewer", "BuffBarCooldownViewer" }
+local CD_VIEWER_NAMES   = { "EssentialCooldownViewer", "UtilityCooldownViewer" }
+
+-- Live scan across viewer children looking for a frame currently displaying
+-- the target spellID. Used as fallback when the cached entry.frame is nil or
+-- stale — aura pool frames are only captured into the map when the CDM fires
+-- SetAuraInstanceInfo, so rarely-displayed or not-yet-seen auras never get a
+-- cached ref.
+local function ScanViewersForSpellID(viewers, spellID)
+    for _, name in ipairs(viewers) do
+        local viewer = _G[name]
+        if viewer then
+            for _, child in ipairs({ viewer:GetChildren() }) do
+                local ci = child.cooldownInfo
+                if ci and (ci.spellID == spellID or ci.overrideSpellID == spellID) then
+                    return child
+                end
+            end
+        end
+    end
+end
+
+-- Resolve the anchor frame: number = spellID → look up a CDM frame (cached
+-- map ref first, then live viewer scan); string = global frame name;
+-- nil/empty = UIParent. Anchoring a UIParent-parented FontString to a CDM
+-- frame is safe (same pattern glow overlays use — we never parent to the
+-- CDM frame, only SetPoint to it).
 local function ResolveAnchor(key)
     if not key or key == "" then return UIParent end
 
     if type(key) == "number" then
         for _, map in ipairs({ ns.auraFrameMap or {}, ns.cdFrameMap or {} }) do
             for _, entry in pairs(map) do
-                if entry._lecSpellID == key and entry.frame and entry.frame.cooldownID then
+                if (entry._lecSpellID == key or entry._lecOverrideID == key)
+                   and entry.frame then
                     return entry.frame
                 end
             end
         end
+
+        -- Map lookup missed — do a live scan of viewer children.
+        local frame = ScanViewersForSpellID(AURA_VIEWER_NAMES, key)
+                   or ScanViewersForSpellID(CD_VIEWER_NAMES,   key)
+        if frame then
+            ns.lpmsg("ResolveAnchor: live-scan hit for spellID=" .. key, "DEBUG")
+            return frame
+        end
+
+        ns.lpmsg("ResolveAnchor: no frame for spellID=" .. key .. " — fallback to UIParent", "DEBUG")
         return UIParent
     end
 
@@ -60,25 +94,52 @@ local function ResolveAnchor(key)
     return UIParent
 end
 
--- Create or reuse a FontString for this state key and reapply its config.
+local STRATA_VALUES = {
+    BACKGROUND        = true,
+    LOW               = true,
+    MEDIUM            = true,
+    HIGH              = true,
+    DIALOG            = true,
+    FULLSCREEN        = true,
+    FULLSCREEN_DIALOG = true,
+    TOOLTIP           = true,
+}
+
+-- Create or reuse a FontString (and its container) for this state key and
+-- reapply all config. FontStrings don't own a strata — they inherit from
+-- their parent frame — so each text gets a tiny container Frame whose strata
+-- the user can set independently.
 -- Always re-applies anchor/font so settings-panel tweaks take effect instantly.
 local function EnsureTextFrame(stateKey, tc)
-    local fs = textFrames[stateKey]
-    if not fs then
-        fs = UIParent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    local entry = textFrames[stateKey]
+    if not entry then
+        local container = CreateFrame("Frame", nil, UIParent)
+        container:SetSize(1, 1)
+        local fs = container:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         fs:SetDrawLayer("OVERLAY", 7)
-        textFrames[stateKey] = fs
+        entry = { container = container, fs = fs }
+        textFrames[stateKey] = entry
     end
+    local container, fs = entry.container, entry.fs
 
-    -- Anchor
-    fs:ClearAllPoints()
-    fs:SetPoint(
+    -- Strata
+    local strata = tc.strata
+    if not (strata and STRATA_VALUES[strata]) then strata = "HIGH" end
+    container:SetFrameStrata(strata)
+
+    -- Anchor the container to the resolved frame; the FontString hugs the
+    -- container with SetAllPoints so we only have one set of coordinates
+    -- to manage.
+    container:ClearAllPoints()
+    container:SetPoint(
         tc.point or "CENTER",
         ResolveAnchor(tc.anchorFrame),
         tc.relativePoint or "CENTER",
         tc.x or 0,
         tc.y or 0
     )
+    fs:ClearAllPoints()
+    fs:SetPoint("CENTER", container, "CENTER", 0, 0)
 
     -- Font: prefer an LSM-registered font by name, fall back to whatever the
     -- FontString inherited from its font object.
@@ -105,13 +166,11 @@ end
 -- configured text. Passing the secret `applications` value directly to SetText
 -- displays it without tainting.
 --
--- tc.showAsOne is a FALLBACK (not an override): many buffs don't report a
--- stack count at 1 but do once they reach 2+. When applications is present we
--- always show it through; when it's missing (nil) and the user opted in, we
--- display a literal "1" so a single-application aura still has a visible
--- indicator. The only interaction with auraData.applications is a truthy
--- check — no read, no compare, no arithmetic (all of which would taint a
--- secret number).
+-- Many buffs don't report a stack count at 1 but do once they reach 2+. When
+-- applications is present we pass it straight to SetText; when it's missing
+-- we display a literal "1" so the aura still has a visible indicator while
+-- active. The only interaction with auraData.applications is a truthy check —
+-- no read, no compare, no arithmetic (all of which would taint a secret number).
 local function UpdateStack(spellID, unit, instanceID)
     local items = textItemLookup[spellID]
     if not items then return end
@@ -130,11 +189,10 @@ local function UpdateStack(spellID, unit, instanceID)
                         -- tostring — that would taint.
                         ---@diagnostic disable-next-line: param-type-mismatch
                         fs:SetText(auraData.applications)
-                        fs:Show()
-                    elseif tc.showAsOne then
+                    else
                         fs:SetText("1")
-                        fs:Show()
                     end
+                    fs:Show()
                 end
             end
         end
@@ -150,13 +208,13 @@ local function ClearStack(spellID)
         if type(item.texts) == "table" then
             for uid, tc in pairs(item.texts) do
                 local stateKey = tostring(spellID) .. "_" .. itemID .. "_" .. uid
-                local fs = textFrames[stateKey]
-                if fs then
+                local entry = textFrames[stateKey]
+                if entry then
                     if tc.hideAtZero then
-                        fs:Hide()
+                        entry.fs:Hide()
                     else
+                        local fs = EnsureTextFrame(stateKey, tc)
                         fs:SetText("0")
-                        EnsureTextFrame(stateKey, tc)  -- refresh anchor/font
                         fs:Show()
                     end
                 end
@@ -227,19 +285,20 @@ function ns.StopAllTexts()
     ns.AuraTracker:Off("LEC_AURA_ADDED",   "texts")
     ns.AuraTracker:Off("LEC_AURA_UPDATED", "texts")
     ns.AuraTracker:Off("LEC_AURA_REMOVED", "texts")
-    for _, fs in pairs(textFrames) do fs:Hide() end
+    for _, entry in pairs(textFrames) do entry.fs:Hide() end
     wipe(textItemLookup)
 end
 
--- Preview helper for the settings panel. Shows a literal number so the user
--- can see their anchor/font/color choices without the aura needing to be live.
-function ns.PreviewText(tc, stateKey, on)
+-- Preview helper for the settings panel. Shows a literal value so the user
+-- can see their anchor/font/color/size choices without the aura needing to be
+-- live. `value` defaults to "1" and is coerced to a string before display.
+function ns.PreviewText(tc, stateKey, on, value)
     if on then
         local fs = EnsureTextFrame(stateKey, tc)
-        fs:SetText("1")
+        fs:SetText(tostring(value or "1"))
         fs:Show()
     else
-        local fs = textFrames[stateKey]
-        if fs then fs:Hide() end
+        local entry = textFrames[stateKey]
+        if entry then entry.fs:Hide() end
     end
 end

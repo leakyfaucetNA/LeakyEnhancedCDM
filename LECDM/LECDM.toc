@@ -17,6 +17,7 @@ modules\cooldowns.lua
 modules\events.lua
 modules\glows.lua
 modules\sounds.lua
+modules\texts.lua
 
 # Settings
 settings\settings.lua

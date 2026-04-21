@@ -269,6 +269,9 @@ local function MakeColorSwatch(parent, initial, cb)
 
     b:SetScript("OnClick", function()
         local r, g, b_, a = unpack(b.rgba)
+        -- Modern ColorPickerFrame (post-Dragonflight) uses `opacity` as ALPHA
+        -- directly (1 = opaque, 0 = transparent). The pre-DF convention flipped
+        -- it to transparency; using that convention here inverts the slider.
         local info = {
             swatchFunc = function()
                 local nr, ng, nb = ColorPickerFrame:GetColorRGB()
@@ -277,18 +280,18 @@ local function MakeColorSwatch(parent, initial, cb)
                 if cb then cb(unpack(b.rgba)) end
             end,
             opacityFunc = function()
-                b.rgba[4] = 1 - (ColorPickerFrame:GetColorAlpha() or 0)
+                b.rgba[4] = ColorPickerFrame:GetColorAlpha() or 1
                 tex:SetVertexColor(b.rgba[1], b.rgba[2], b.rgba[3], b.rgba[4])
                 if cb then cb(unpack(b.rgba)) end
             end,
             cancelFunc = function(prev)
                 b.rgba[1], b.rgba[2], b.rgba[3], b.rgba[4] =
-                    prev.r or 1, prev.g or 1, prev.b or 1, 1 - (prev.opacity or 0)
+                    prev.r or 1, prev.g or 1, prev.b or 1, prev.opacity or 1
                 tex:SetVertexColor(unpack(b.rgba))
                 if cb then cb(unpack(b.rgba)) end
             end,
             hasOpacity = true,
-            opacity    = 1 - (a or 1),
+            opacity    = a or 1,
             r = r, g = g, b = b_,
         }
         if ColorPickerFrame.SetupColorPickerAndShow then
@@ -616,11 +619,12 @@ local function CreateGlowPanel(parent, gc, itemSpellID)
 
     if gc.advanced then
         -- Small factories so each advanced row is one line at the call site.
-        local function numRow(label, field, default, isInt)
+        -- No SetNumeric: it blocks "-" and "." characters, breaking negative
+        -- offsets and decimal frequencies. tonumber() handles both on submit.
+        local function numRow(label, field, default)
             Row(p, y, label)
             local eb = MakeEdit(p, 70, 22)
             eb:SetPoint("TOPLEFT", PAD + 108, y + 4)
-            if isInt then eb.edit:SetNumeric(true) end
             eb.edit:SetText(tostring(gc[field] or default))
             eb.edit:SetScript("OnEditFocusLost", function(e)
                 local n = tonumber(e:GetText())
@@ -651,28 +655,28 @@ local function CreateGlowPanel(parent, gc, itemSpellID)
 
         local gType = gc.glowType or "Pixel"
         if gType == "Pixel" then
-            numRow("Lines",      "lines",  8,    true)
-            numRow("Frequency",  "freq",   0.25, false)
-            numRow("Length",     "length", 8,    true)
-            numRow("Thickness",  "th",     2,    true)
+            numRow("Lines",      "lines",  8)
+            numRow("Frequency",  "freq",   0.25)
+            numRow("Length",     "length", 8)
+            numRow("Thickness",  "th",     2)
             boolRow("Border",    "border")
-            numRow("X Offset",   "xOff",   0,    true)
-            numRow("Y Offset",   "yOff",   0,    true)
+            numRow("X Offset",   "xOff",   0)
+            numRow("Y Offset",   "yOff",   0)
         elseif gType == "AutoCast" then
-            numRow("Particles",  "particles", 4,    true)
-            numRow("Frequency",  "freq",      0.125, false)
-            numRow("Scale",      "scale",     1,    false)
-            numRow("X Offset",   "xOff",      0,    true)
-            numRow("Y Offset",   "yOff",      0,    true)
+            numRow("Particles",  "particles", 4)
+            numRow("Frequency",  "freq",      0.125)
+            numRow("Scale",      "scale",     1)
+            numRow("X Offset",   "xOff",      0)
+            numRow("Y Offset",   "yOff",      0)
         elseif gType == "Proc" then
             boolRow("Start Anim", "startAnim")
-            numRow("Duration",   "duration", 1, false)
-            numRow("X Offset",   "xOff",     0, true)
-            numRow("Y Offset",   "yOff",     0, true)
+            numRow("Duration",   "duration", 1)
+            numRow("X Offset",   "xOff",     0)
+            numRow("Y Offset",   "yOff",     0)
         elseif gType == "Button" then
             boolRow("Start Anim", "startAnim")
-            numRow("X Offset",   "xOff", 0, true)
-            numRow("Y Offset",   "yOff", 0, true)
+            numRow("X Offset",   "xOff", 0)
+            numRow("Y Offset",   "yOff", 0)
         end
     end
 
@@ -859,13 +863,24 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID)
     en:SetChecked(tc.enabled ~= false)
     en.onChanged = function(v) tc.enabled = v; RefreshAll() end
 
-    -- Preview button — writes a literal "1" to the frame using the current
-    -- config so the user can see anchor/font/color choices. Auto-stops on hide
-    -- (panel collapse, settings close, etc.).
+    -- Preview button — writes the preview-value editbox contents (default "1")
+    -- to the frame using the current config so the user can see anchor, font,
+    -- color, and size choices. Auto-stops on hide (panel collapse, settings
+    -- close, etc.).
     local stateKey = "__preview_" .. tostring(uid or 0) .. "_" .. tostring(itemSpellID or 0)
     local previewing = false
     local previewBtn = MakeButton(p, "Preview", 70, 22)
     previewBtn:SetPoint("LEFT", en, "RIGHT", 80, 0)
+
+    local previewValE = MakeEdit(p, 60, 22)
+    previewValE:SetPoint("LEFT", previewBtn, "RIGHT", 6, 0)
+    previewValE.edit:SetText("1")
+    local function getPreviewValue()
+        local t = previewValE.edit:GetText()
+        if not t or t == "" then return "1" end
+        return t
+    end
+
     local function stopPreview()
         if not previewing then return end
         previewing = false
@@ -874,17 +889,22 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID)
     end
     local function startPreview()
         previewing = true
-        if ns.PreviewText then ns.PreviewText(tc, stateKey, true) end
+        if ns.PreviewText then ns.PreviewText(tc, stateKey, true, getPreviewValue()) end
         previewBtn.text:SetText("Stop")
     end
     previewBtn:SetScript("OnClick", function()
         if previewing then stopPreview() else startPreview() end
     end)
     p:HookScript("OnHide", stopPreview)
+
     -- Any config change during preview: refresh so positional/font changes apply.
     local function refreshPreview()
-        if previewing and ns.PreviewText then ns.PreviewText(tc, stateKey, true) end
+        if previewing and ns.PreviewText then
+            ns.PreviewText(tc, stateKey, true, getPreviewValue())
+        end
     end
+    -- Changing the preview number while previewing updates the text live.
+    previewValE.edit:SetScript("OnTextChanged", function() refreshPreview() end)
     y = y - 30
 
     Row(p, y, "Hide at 0")
@@ -892,17 +912,6 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID)
     hz:SetPoint("TOPLEFT", PAD + 108, y + 4)
     hz:SetChecked(tc.hideAtZero ~= false)
     hz.onChanged = function(v) tc.hideAtZero = v; RefreshAll() end
-    y = y - 30
-
-    -- Fallback for spells that don't report a stack at 1 (but do at 2+).
-    -- When applications is present we always display it; when it's missing
-    -- and this toggle is on, we display "1" so the aura still has a visible
-    -- indicator while active.
-    Row(p, y, "Show 1 when no stack reported")
-    local s1 = MakeCheck(p)
-    s1:SetPoint("TOPLEFT", PAD + 108, y + 4)
-    s1:SetChecked(tc.showAsOne == true)
-    s1.onChanged = function(v) tc.showAsOne = v and true or nil; RefreshAll() end
     y = y - 30
 
     -- ---- Anchor frame picker ----
@@ -1026,14 +1035,37 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID)
         y = y - 30
     end
 
-    pointDropdown("Point",          "point",         "CENTER")
+    -- Anchor point on our text is always CENTER — simpler UX, and any
+    -- positioning the user wants is expressed via Relative Point + offsets.
+    tc.point = "CENTER"
     pointDropdown("Relative Point", "relativePoint", "CENTER")
 
-    local function numRow(label, field, default, isInt)
+    -- Frame strata: controls which UI layer the text renders in. HIGH by
+    -- default so it sits above most world-ui and unit frames.
+    local STRATA_LIST = {
+        "BACKGROUND", "LOW", "MEDIUM", "HIGH",
+        "DIALOG",     "FULLSCREEN", "FULLSCREEN_DIALOG", "TOOLTIP",
+    }
+    Row(p, y, "Strata")
+    local strataDD = MakeDropdown(p, 180, 22)
+    strataDD:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    strataDD:SetValue(tc.strata or "HIGH")
+    strataDD:SetScript("OnClick", function(s)
+        local items = {}
+        for _, st in ipairs(STRATA_LIST) do items[#items + 1] = { label = st, value = st } end
+        s:Open(items, function(v, l)
+            tc.strata = v; strataDD:SetValue(l)
+            RefreshAll(); refreshPreview()
+        end)
+    end)
+    y = y - 30
+
+    -- No SetNumeric: it blocks "-" and "." characters, breaking negative
+    -- offsets. tonumber() handles both on submit.
+    local function numRow(label, field, default)
         Row(p, y, label)
         local eb = MakeEdit(p, 70, 22)
         eb:SetPoint("TOPLEFT", PAD + 108, y + 4)
-        if isInt then eb.edit:SetNumeric(true) end
         eb.edit:SetText(tostring(tc[field] or default))
         eb.edit:SetScript("OnEditFocusLost", function(e)
             local n = tonumber(e:GetText())
@@ -1043,8 +1075,8 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID)
         y = y - 30
     end
 
-    numRow("X Offset",  "x",        0, true)
-    numRow("Y Offset",  "y",        0, true)
+    numRow("X Offset",  "x", 0)
+    numRow("Y Offset",  "y", 0)
 
     -- Font picker from LSM's "font" channel.
     Row(p, y, "Font")
@@ -1066,7 +1098,7 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID)
     end)
     y = y - 30
 
-    numRow("Font Size", "fontSize", 18, true)
+    numRow("Font Size", "fontSize", 18)
 
     Row(p, y, "Color")
     local rgba = tc.rgba or {1, 1, 1, 1}
