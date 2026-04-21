@@ -53,7 +53,8 @@ local function HasConfigsOfType(itemType)
         if item.type == itemType and ns.ShouldLoadItem(LECDM.db, itemID) then
             if (item.glows  and next(item.glows))
                or (item.sounds and next(item.sounds))
-               or (item.events and next(item.events)) then
+               or (item.events and next(item.events))
+               or (item.texts  and next(item.texts)) then
                 return true
             end
         end
@@ -121,6 +122,7 @@ function ns.SetupAddon(addon)
     ns.SetupGlows(addon)
     ns.SetupSounds(addon)
     ns.SetupEvents(addon)
+    ns.SetupTexts(addon)
 
     executionDepth = executionDepth - 1
     ns.lpmsg("Lifecycle: SetupAddon complete", "DEBUG")

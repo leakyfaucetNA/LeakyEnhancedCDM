@@ -357,6 +357,7 @@ local function RefreshAll()
     ns.SetupGlows(LECDM)
     ns.SetupSounds(LECDM)
     ns.SetupEvents(LECDM)
+    if ns.SetupTexts then ns.SetupTexts(LECDM) end
 end
 
 -- -------------------------------------------------- --
@@ -835,6 +836,252 @@ local function CreateEventPanel(parent, ec)
     return p
 end
 
+local ANCHOR_POINTS = {
+    "TOPLEFT", "TOP", "TOPRIGHT",
+    "LEFT",    "CENTER", "RIGHT",
+    "BOTTOMLEFT", "BOTTOM", "BOTTOMRIGHT",
+}
+
+local function CreateTextPanel(parent, tc, uid, itemSpellID)
+    local p = MakePanel(parent, C_PANEL, C_BDR)
+    local y = -PAD
+
+    Row(p, y, "Name")
+    local nameE = MakeEdit(p, 220, 22)
+    nameE:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    nameE.edit:SetText(tc.name or "")
+    nameE.edit:SetScript("OnEditFocusLost", function(e) tc.name = e:GetText() end)
+    y = y - 30
+
+    Row(p, y, "Enabled")
+    local en = MakeCheck(p)
+    en:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    en:SetChecked(tc.enabled ~= false)
+    en.onChanged = function(v) tc.enabled = v; RefreshAll() end
+
+    -- Preview button — writes a literal "1" to the frame using the current
+    -- config so the user can see anchor/font/color choices. Auto-stops on hide
+    -- (panel collapse, settings close, etc.).
+    local stateKey = "__preview_" .. tostring(uid or 0) .. "_" .. tostring(itemSpellID or 0)
+    local previewing = false
+    local previewBtn = MakeButton(p, "Preview", 70, 22)
+    previewBtn:SetPoint("LEFT", en, "RIGHT", 80, 0)
+    local function stopPreview()
+        if not previewing then return end
+        previewing = false
+        if ns.PreviewText then ns.PreviewText(tc, stateKey, false) end
+        previewBtn.text:SetText("Preview")
+    end
+    local function startPreview()
+        previewing = true
+        if ns.PreviewText then ns.PreviewText(tc, stateKey, true) end
+        previewBtn.text:SetText("Stop")
+    end
+    previewBtn:SetScript("OnClick", function()
+        if previewing then stopPreview() else startPreview() end
+    end)
+    p:HookScript("OnHide", stopPreview)
+    -- Any config change during preview: refresh so positional/font changes apply.
+    local function refreshPreview()
+        if previewing and ns.PreviewText then ns.PreviewText(tc, stateKey, true) end
+    end
+    y = y - 30
+
+    Row(p, y, "Hide at 0")
+    local hz = MakeCheck(p)
+    hz:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    hz:SetChecked(tc.hideAtZero ~= false)
+    hz.onChanged = function(v) tc.hideAtZero = v; RefreshAll() end
+    y = y - 30
+
+    -- Fallback for spells that don't report a stack at 1 (but do at 2+).
+    -- When applications is present we always display it; when it's missing
+    -- and this toggle is on, we display "1" so the aura still has a visible
+    -- indicator while active.
+    Row(p, y, "Show 1 when no stack reported")
+    local s1 = MakeCheck(p)
+    s1:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    s1:SetChecked(tc.showAsOne == true)
+    s1.onChanged = function(v) tc.showAsOne = v and true or nil; RefreshAll() end
+    y = y - 30
+
+    -- ---- Anchor frame picker ----
+    -- Mirrors the glow target dropdown: "(custom)" + unique entries from
+    -- auraFrameMap + cdFrameMap with "(Aura)"/"(CD)" suffix when a name
+    -- collides across the two maps.
+    local function collectAnchorMap(map)
+        local seen, out = {}, {}
+        for name, entry in pairs(map) do
+            if entry._lecSpellID and not seen[entry] then
+                seen[entry] = true
+                out[#out + 1] = { name = name, entry = entry }
+            end
+        end
+        return out
+    end
+    local function buildAnchorNameCount(auraList, cdList)
+        local nameCount = {}
+        for _, rec in ipairs(auraList) do nameCount[rec.name] = (nameCount[rec.name] or 0) + 1 end
+        for _, rec in ipairs(cdList)   do nameCount[rec.name] = (nameCount[rec.name] or 0) + 1 end
+        return nameCount
+    end
+
+    local function anchorLabel()
+        if tc.anchorCustom then return "(custom)" end
+        if not tc.anchorFrame or tc.anchorFrame == "" then return "UIParent" end
+        if type(tc.anchorFrame) == "number" then
+            local auraList = collectAnchorMap(ns.auraFrameMap or {})
+            local cdList   = collectAnchorMap(ns.cdFrameMap   or {})
+            local nameCount = buildAnchorNameCount(auraList, cdList)
+            for _, rec in ipairs(auraList) do
+                if rec.entry._lecSpellID == tc.anchorFrame then
+                    return (nameCount[rec.name] or 0) > 1 and rec.name .. " (Aura)" or rec.name
+                end
+            end
+            for _, rec in ipairs(cdList) do
+                if rec.entry._lecSpellID == tc.anchorFrame then
+                    return (nameCount[rec.name] or 0) > 1 and rec.name .. " (CD)" or rec.name
+                end
+            end
+            return tostring(tc.anchorFrame)
+        end
+        return tostring(tc.anchorFrame)
+    end
+
+    Row(p, y, "Anchor Frame")
+    local anc = MakeDropdown(p, 220, 22)
+    anc:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    anc:SetValue(anchorLabel())
+
+    -- Custom-frame textbox, visible only when anchorCustom is true.
+    if tc.anchorCustom then
+        local afE = MakeEdit(p, 160, 22)
+        afE:SetPoint("LEFT", anc, "RIGHT", 6, 0)
+        afE.edit:SetText(tostring(tc.anchorFrame or ""))
+        afE.edit:SetScript("OnEditFocusLost", function(e)
+            tc.anchorFrame = e:GetText()
+            RefreshAll(); refreshPreview()
+        end)
+    end
+
+    anc:SetScript("OnClick", function(s)
+        local auraList = collectAnchorMap(ns.auraFrameMap or {})
+        local cdList   = collectAnchorMap(ns.cdFrameMap   or {})
+        local nameCount = buildAnchorNameCount(auraList, cdList)
+
+        local items = {
+            { label = "UIParent",  value = "UIParent"   },
+            { label = "(custom)",  value = "__custom__" },
+        }
+        local function add(rec, suffix)
+            local label = (nameCount[rec.name] or 0) > 1
+                          and (rec.name .. " " .. suffix)
+                          or rec.name
+            items[#items + 1] = { label = label, value = rec.entry._lecSpellID }
+        end
+        for _, rec in ipairs(auraList) do add(rec, "(Aura)") end
+        for _, rec in ipairs(cdList)   do add(rec, "(CD)") end
+
+        table.sort(items, function(a, b)
+            if a.value == "UIParent"   then return true  end
+            if b.value == "UIParent"   then return false end
+            if a.value == "__custom__" then return true  end
+            if b.value == "__custom__" then return false end
+            return tostring(a.label) < tostring(b.label)
+        end)
+
+        s:Open(items, function(v, l)
+            if v == "__custom__" then
+                tc.anchorCustom = true
+                tc.anchorFrame  = ""
+            elseif v == "UIParent" then
+                tc.anchorCustom = nil
+                tc.anchorFrame  = "UIParent"
+            else
+                tc.anchorCustom = nil
+                tc.anchorFrame  = v
+            end
+            anc:SetValue(l)
+            RefreshAll(); refreshPreview()
+            if BuildSubmoduleList then BuildSubmoduleList() end
+        end)
+    end)
+    y = y - 30
+
+    local function pointDropdown(label, field, default)
+        Row(p, y, label)
+        local dd = MakeDropdown(p, 140, 22)
+        dd:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        dd:SetValue(tc[field] or default)
+        dd:SetScript("OnClick", function(s)
+            local items = {}
+            for _, pt in ipairs(ANCHOR_POINTS) do
+                items[#items + 1] = { label = pt, value = pt }
+            end
+            s:Open(items, function(v)
+                tc[field] = v; dd:SetValue(v)
+                RefreshAll(); refreshPreview()
+            end)
+        end)
+        y = y - 30
+    end
+
+    pointDropdown("Point",          "point",         "CENTER")
+    pointDropdown("Relative Point", "relativePoint", "CENTER")
+
+    local function numRow(label, field, default, isInt)
+        Row(p, y, label)
+        local eb = MakeEdit(p, 70, 22)
+        eb:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        if isInt then eb.edit:SetNumeric(true) end
+        eb.edit:SetText(tostring(tc[field] or default))
+        eb.edit:SetScript("OnEditFocusLost", function(e)
+            local n = tonumber(e:GetText())
+            tc[field] = n or default
+            RefreshAll(); refreshPreview()
+        end)
+        y = y - 30
+    end
+
+    numRow("X Offset",  "x",        0, true)
+    numRow("Y Offset",  "y",        0, true)
+
+    -- Font picker from LSM's "font" channel.
+    Row(p, y, "Font")
+    local fontDD = MakeDropdown(p, 200, 22)
+    fontDD:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    fontDD:SetValue(tostring(tc.font or "(default)"))
+    fontDD:SetScript("OnClick", function(s)
+        local items = { { label = "(default)", value = "__default__" } }
+        local list = LSM and LSM:List("font") or {}
+        for _, name in ipairs(list) do
+            items[#items + 1] = { label = name, value = name }
+        end
+        s:Open(items, function(v, l)
+            if v == "__default__" then tc.font = nil
+            else tc.font = v end
+            fontDD:SetValue(l)
+            RefreshAll(); refreshPreview()
+        end)
+    end)
+    y = y - 30
+
+    numRow("Font Size", "fontSize", 18, true)
+
+    Row(p, y, "Color")
+    local rgba = tc.rgba or {1, 1, 1, 1}
+    tc.rgba = rgba
+    local sw = MakeColorSwatch(p, rgba, function(r, g, b_, a)
+        tc.rgba = {r, g, b_, a}
+        RefreshAll(); refreshPreview()
+    end)
+    sw:SetPoint("TOPLEFT", PAD + 108, y + 2)
+    y = y - 30
+
+    p:SetHeight(-y + PAD)
+    return p
+end
+
 -- -------------------------------------------------- --
 --  Right panel — sub-module accordion                --
 -- -------------------------------------------------- --
@@ -899,6 +1146,7 @@ function BuildSubmoduleList()
             if kind == "Glow"  then panel = CreateGlowPanel(subContent, sc, spellID) end
             if kind == "Sound" then panel = CreateSoundPanel(subContent, sc) end
             if kind == "Event" then panel = CreateEventPanel(subContent, sc) end
+            if kind == "Text"  then panel = CreateTextPanel(subContent, sc, uid, spellID) end
             panel:SetPoint("TOPLEFT", 0, yOff)
             panel:SetPoint("TOPRIGHT", 0, yOff)
             table.insert(subPanels, panel)
@@ -914,6 +1162,9 @@ function BuildSubmoduleList()
     end
     if item.events then
         for uid, ec in pairs(item.events) do AddSubRow("Event", uid, ec) end
+    end
+    if item.texts then
+        for uid, tc in pairs(item.texts) do AddSubRow("Text", uid, tc) end
     end
 
     subContent:SetHeight(math.max(1, -yOff + 10))
@@ -956,6 +1207,21 @@ local function AddSubmodule(kind)
             enabled   = true,
             triggerOn = (selectedCat == "auras") and "onAdd" or "onReady",
             eventName = "",
+        }
+    elseif kind == "Text" then
+        item.texts = item.texts or {}
+        item.texts[uid] = {
+            name          = "Stack Text",
+            enabled       = true,
+            hideAtZero    = true,
+            anchorFrame   = "UIParent",
+            point         = "CENTER",
+            relativePoint = "CENTER",
+            x             = 0,
+            y             = 0,
+            fontSize      = 18,
+            fontOutline   = "OUTLINE",
+            rgba          = {1, 1, 1, 1},
         }
     end
 
@@ -1278,10 +1544,14 @@ local function BuildFrame()
     addSound:SetPoint("LEFT", addGlow, "RIGHT", 6, 0)
     local addEvent = MakeAccentButton(rightHeader, "+Event", 64, 22)
     addEvent:SetPoint("LEFT", addSound, "RIGHT", 6, 0)
+    -- Text sub-module is aura-only (displays stack count). Hidden on CD items.
+    local addText  = MakeAccentButton(rightHeader, "+Text",  60, 22)
+    addText:SetPoint("LEFT", addEvent, "RIGHT", 6, 0)
 
     addGlow:SetScript("OnClick",  function() AddSubmodule("Glow")  end)
     addSound:SetScript("OnClick", function() AddSubmodule("Sound") end)
     addEvent:SetScript("OnClick", function() AddSubmodule("Event") end)
+    addText:SetScript("OnClick",  function() AddSubmodule("Text")  end)
 
     enCheck.onChanged = function(v)
         if not selectedKey then return end
@@ -1306,6 +1576,9 @@ local function BuildFrame()
             end
         end
         enCheck:SetChecked(has)
+
+        -- +Text only makes sense for auras (stack count). Hide on CDs.
+        if selectedCat == "auras" then addText:Show() else addText:Hide() end
     end
 
     subScroll = CreateFrame("ScrollFrame", nil, rightPanel, "UIPanelScrollFrameTemplate")
