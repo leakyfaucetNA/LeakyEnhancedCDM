@@ -401,15 +401,21 @@ end
 --  Trigger Pipeline                                  --
 -- -------------------------------------------------- --
 
+-- Trigger → inverse mapping. Active-state triggers (aura present, CD ready)
+-- glow directly; "absent-state" triggers (aura removed, CD used) glow when
+-- the spell is in the opposite state — that's what "inverse" encodes.
+local INVERSE_TRIGGERS = { onRemove = true, onUsed = true }
+
 local function ProcessGlowTrigger(item, spellID, isActive)
     if type(item.glows) == "table" then
         for uid, gc in pairs(item.glows) do
             if gc.enabled ~= false then
                 local target = ResolveGlowTarget(gc.frameKey)
                 if target then
+                    local inverse = INVERSE_TRIGGERS[gc.triggerOn] == true
                     local shouldGlow = ComputeShouldGlow(
                         true, gc.preview or false,
-                        gc.inverse or false,
+                        inverse,
                         isActive, gc.showAtStacks, gc.stackComparison, spellID)
                     gc.spellID  = spellID
                     gc.safeGlow = true  -- CDM frames always need UIParent overlay
@@ -425,6 +431,19 @@ local function ProcessGlowTrigger(item, spellID, isActive)
 end
 
 ns.ProcessGlowTrigger = ProcessGlowTrigger
+
+-- Start or stop a preview glow for a single glow config, independent of live
+-- aura/CD state. Used by the settings UI — preview uses its own LCG key so it
+-- doesn't collide with a real glow on the same frame.
+function ns.PreviewGlow(gc, spellID, on)
+    if not gc then return end
+    local target = ResolveGlowTarget(gc.frameKey or spellID)
+    if not target then return end
+    gc.spellID  = spellID
+    gc.safeGlow = true
+    gc.key      = "__preview__"
+    ns.ToggleGlow(target, gc, on and true or false)
+end
 
 local function processChanges()
     scheduledThisTick = false

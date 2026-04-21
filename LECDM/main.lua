@@ -42,6 +42,48 @@ function ns.GetSpellName(id)
     return info and info.name or nil
 end
 
+-- Does the saved DB have any enabled+loadable item of the given type that has
+-- at least one configured sub-module (glow/sound/event)? Used to skip the
+-- associated tracker's event registration and frame hooks when nothing is
+-- listening — no UNIT_AURA chatter on an addon with no aura configs, no
+-- UNIT_SPELLCAST_SUCCEEDED chatter when no CD configs.
+local function HasConfigsOfType(itemType)
+    if not LECDM or not LECDM.db or not ns.ShouldLoadItem then return false end
+    for itemID, item in pairs(LECDM.db.profile.items) do
+        if item.type == itemType and ns.ShouldLoadItem(LECDM.db, itemID) then
+            if (item.glows  and next(item.glows))
+               or (item.sounds and next(item.sounds))
+               or (item.events and next(item.events)) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function ns.HasAuraConfigs() return HasConfigsOfType("auraTrigger") end
+function ns.HasCDConfigs()   return HasConfigsOfType("cdTrigger")   end
+
+-- Reconcile tracker state with current configs. Called from SetupAddon and
+-- whenever the settings UI edits items.
+function ns.UpdateTrackerState()
+    local hasAura = ns.HasAuraConfigs()
+    local hasCD   = ns.HasCDConfigs()
+    if hasAura then
+        ns.AuraTracker:Init({"player"})
+        ns.AuraTracker:SeedFrames()
+    else
+        ns.AuraTracker:Reset()
+    end
+    if hasCD then
+        ns.CDTracker:Init()
+        ns.CDTracker:SeedState()
+    else
+        ns.CDTracker:Reset()
+    end
+    ns.lpmsg("TrackerState: aura=" .. tostring(hasAura) .. " cd=" .. tostring(hasCD), "DEBUG")
+end
+
 -- -------------------------------------------------- --
 --  Setup                                             --
 -- -------------------------------------------------- --
@@ -70,12 +112,12 @@ function ns.SetupAddon(addon)
 
     executionDepth = executionDepth + 1
 
-    ns.AuraTracker:Init({"player"})
-    ns.CDTracker:Init()
+    -- Maps are always built (settings UI reads them for spell lists). Tracker
+    -- init is deferred to UpdateTrackerState which skips it when nothing is
+    -- configured for that tracker type.
     ns.BuildSpellMap()
     ns.BuildAuraMap()
-    ns.AuraTracker:SeedFrames()
-    ns.CDTracker:SeedState()
+    ns.UpdateTrackerState()
     ns.SetupGlows(addon)
     ns.SetupSounds(addon)
     ns.SetupEvents(addon)
@@ -133,7 +175,8 @@ end
 
 function LECDM:OnEnable()
     self:RegisterChatCommand("lecdm", "SlashCommand")
-    ns.lpmsg("Loaded")
+    self:RegisterChatCommand("lec", "SlashCommand")
+    ns.lpmsg("Loaded type /lec or /lecdm for options")
 end
 
 -- -------------------------------------------------- --

@@ -348,9 +348,12 @@ local function GetOrCreateItem(spellID, name)
     return id, item
 end
 
--- Refresh tracking modules after config edits.
+-- Refresh tracking modules after config edits. UpdateTrackerState flips the
+-- aura / CD trackers on or off depending on whether any matching configs
+-- exist, so adding or clearing configs takes effect immediately.
 local function RefreshAll()
     if not LECDM or not LECDM.db then return end
+    if ns.UpdateTrackerState then ns.UpdateTrackerState() end
     ns.SetupGlows(LECDM)
     ns.SetupSounds(LECDM)
     ns.SetupEvents(LECDM)
@@ -391,7 +394,7 @@ end
 local BuildSubmoduleList
 
 -- Build glow options panel.
-local function CreateGlowPanel(parent, gc)
+local function CreateGlowPanel(parent, gc, itemSpellID)
     local p = MakePanel(parent, C_PANEL, C_BDR)
     local y = -PAD
 
@@ -426,31 +429,111 @@ local function CreateGlowPanel(parent, gc)
     end)
     y = y - 30
 
+    -- ---- Target picker ----
+    -- Dedupe per-map by entry table ref (maps store the same entry under both
+    -- base and override name keys).
+    local function collectMap(map)
+        local seen, out = {}, {}
+        for name, entry in pairs(map) do
+            if entry._lecSpellID and not seen[entry] then
+                seen[entry] = true
+                out[#out + 1] = { name = name, entry = entry }
+            end
+        end
+        return out
+    end
+
+    -- Build name-collision count so "(Aura)"/"(CD)" suffix only appears when a
+    -- spell name exists in both maps.
+    local function buildNameCount(auraList, cdList)
+        local nameCount = {}
+        for _, rec in ipairs(auraList) do nameCount[rec.name] = (nameCount[rec.name] or 0) + 1 end
+        for _, rec in ipairs(cdList)   do nameCount[rec.name] = (nameCount[rec.name] or 0) + 1 end
+        return nameCount
+    end
+
+    -- Resolve what to display in the collapsed dropdown for the current frameKey.
+    local function TargetLabel()
+        if gc.customTarget then return "(custom)" end
+        if not gc.frameKey or gc.frameKey == false then return "(this spell's frame)" end
+        if type(gc.frameKey) == "number" then
+            local auraList = collectMap(ns.auraFrameMap or {})
+            local cdList   = collectMap(ns.cdFrameMap   or {})
+            local nameCount = buildNameCount(auraList, cdList)
+            for _, rec in ipairs(auraList) do
+                if rec.entry._lecSpellID == gc.frameKey then
+                    return (nameCount[rec.name] or 0) > 1 and rec.name .. " (Aura)" or rec.name
+                end
+            end
+            for _, rec in ipairs(cdList) do
+                if rec.entry._lecSpellID == gc.frameKey then
+                    return (nameCount[rec.name] or 0) > 1 and rec.name .. " (CD)" or rec.name
+                end
+            end
+            return tostring(gc.frameKey)
+        end
+        return tostring(gc.frameKey)
+    end
+
     Row(p, y, "Target")
     local tgt = MakeDropdown(p, 220, 22)
     tgt:SetPoint("TOPLEFT", PAD + 108, y + 4)
-    tgt:SetValue(tostring(gc.frameKey or "(spell frame)"))
+    tgt:SetValue(TargetLabel())
+
+    -- Custom-target textbox (only shown when gc.customTarget is true).
+    local customEdit
+    if gc.customTarget then
+        customEdit = MakeEdit(p, 160, 22)
+        customEdit:SetPoint("LEFT", tgt, "RIGHT", 6, 0)
+        customEdit.edit:SetText(tostring(gc.frameKey or ""))
+        customEdit.edit:SetScript("OnEditFocusLost", function(e)
+            gc.frameKey = e:GetText()
+            RefreshAll()
+        end)
+    end
+
     tgt:SetScript("OnClick", function(s)
-        local items = {}
-        local map = GetMap()
-        table.insert(items, { label = "(this spell's frame)", value = false })
-        for key, entry in pairs(map) do
-            if entry._lecSpellID then
-                table.insert(items, { label = key, value = entry._lecSpellID })
-            end
+        local auraList = collectMap(ns.auraFrameMap or {})
+        local cdList   = collectMap(ns.cdFrameMap   or {})
+        local nameCount = buildNameCount(auraList, cdList)
+
+        local items = {
+            { label = "(this spell's frame)", value = false    },
+            { label = "(custom)",             value = "__custom__" },
+        }
+        local function add(rec, suffix)
+            local label = (nameCount[rec.name] or 0) > 1
+                          and (rec.name .. " " .. suffix)
+                          or rec.name
+            items[#items + 1] = { label = label, value = rec.entry._lecSpellID }
         end
+        for _, rec in ipairs(auraList) do add(rec, "(Aura)") end
+        for _, rec in ipairs(cdList)   do add(rec, "(CD)") end
+
+        -- Keep the two sentinel rows pinned at the top, sort the rest alphabetically.
         table.sort(items, function(a, b)
             if a.value == false then return true end
             if b.value == false then return false end
+            if a.value == "__custom__" then return true end
+            if b.value == "__custom__" then return false end
             return tostring(a.label) < tostring(b.label)
         end)
+
         s:Open(items, function(v, l)
             if v == false then
-                gc.frameKey = gc.spellID or nil
+                gc.customTarget = nil
+                gc.frameKey = nil
+            elseif v == "__custom__" then
+                gc.customTarget = true
+                gc.frameKey = ""
             else
+                gc.customTarget = nil
                 gc.frameKey = v
             end
-            tgt:SetValue(l); RefreshAll()
+            tgt:SetValue(l)
+            RefreshAll()
+            -- Rebuild so the custom-target textbox appears or disappears.
+            if BuildSubmoduleList then BuildSubmoduleList() end
         end)
     end)
     y = y - 30
@@ -462,8 +545,35 @@ local function CreateGlowPanel(parent, gc)
     gtype:SetScript("OnClick", function(s)
         local items = {}
         for _, t in ipairs(GLOW_TYPES) do table.insert(items, {label=t, value=t}) end
-        s:Open(items, function(v) gc.glowType = v; gtype:SetValue(v); RefreshAll() end)
+        s:Open(items, function(v)
+            gc.glowType = v; gtype:SetValue(v); RefreshAll()
+            -- Rebuild so the type-specific advanced fields swap.
+            if BuildSubmoduleList then BuildSubmoduleList() end
+        end)
     end)
+
+    -- Preview toggle. Transient — never saved; cleared on OnHide below.
+    local previewing = false
+    local previewBtn = MakeButton(p, "Preview", 70, 22)
+    previewBtn:SetPoint("LEFT", gtype, "RIGHT", 8, 0)
+    local function stopPreview()
+        if not previewing then return end
+        previewing = false
+        if ns.PreviewGlow then ns.PreviewGlow(gc, itemSpellID, false) end
+        previewBtn.text:SetText("Preview")
+    end
+    previewBtn:SetScript("OnClick", function()
+        if previewing then
+            stopPreview()
+        else
+            previewing = true
+            if ns.PreviewGlow then ns.PreviewGlow(gc, itemSpellID, true) end
+            previewBtn.text:SetText("Stop")
+        end
+    end)
+    -- Auto-stop on any hide: panel collapse, window close, tab change, etc.
+    p:HookScript("OnHide", stopPreview)
+
     y = y - 30
 
     Row(p, y, "Color")
@@ -492,12 +602,78 @@ local function CreateGlowPanel(parent, gc)
     end)
     y = y - 30
 
-    Row(p, y, "Inverse")
-    local inv = MakeCheck(p)
-    inv:SetPoint("TOPLEFT", PAD + 108, y + 4)
-    inv:SetChecked(gc.inverse == true)
-    inv.onChanged = function(v) gc.inverse = v; RefreshAll() end
+    -- ---- Advanced toggle + per-type tuning ----
+    Row(p, y, "Advanced")
+    local adv = MakeCheck(p)
+    adv:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    adv:SetChecked(gc.advanced == true)
+    adv.onChanged = function(v)
+        gc.advanced = v and true or nil
+        if BuildSubmoduleList then BuildSubmoduleList() end
+    end
     y = y - 30
+
+    if gc.advanced then
+        -- Small factories so each advanced row is one line at the call site.
+        local function numRow(label, field, default, isInt)
+            Row(p, y, label)
+            local eb = MakeEdit(p, 70, 22)
+            eb:SetPoint("TOPLEFT", PAD + 108, y + 4)
+            if isInt then eb.edit:SetNumeric(true) end
+            eb.edit:SetText(tostring(gc[field] or default))
+            eb.edit:SetScript("OnEditFocusLost", function(e)
+                local n = tonumber(e:GetText())
+                gc[field] = n or default
+                RefreshAll()
+                if previewing and ns.PreviewGlow then
+                    ns.PreviewGlow(gc, itemSpellID, false)
+                    ns.PreviewGlow(gc, itemSpellID, true)
+                end
+            end)
+            y = y - 30
+        end
+        local function boolRow(label, field)
+            Row(p, y, label)
+            local c = MakeCheck(p)
+            c:SetPoint("TOPLEFT", PAD + 108, y + 4)
+            c:SetChecked(gc[field] == true)
+            c.onChanged = function(v)
+                gc[field] = v and true or nil
+                RefreshAll()
+                if previewing and ns.PreviewGlow then
+                    ns.PreviewGlow(gc, itemSpellID, false)
+                    ns.PreviewGlow(gc, itemSpellID, true)
+                end
+            end
+            y = y - 30
+        end
+
+        local gType = gc.glowType or "Pixel"
+        if gType == "Pixel" then
+            numRow("Lines",      "lines",  8,    true)
+            numRow("Frequency",  "freq",   0.25, false)
+            numRow("Length",     "length", 8,    true)
+            numRow("Thickness",  "th",     2,    true)
+            boolRow("Border",    "border")
+            numRow("X Offset",   "xOff",   0,    true)
+            numRow("Y Offset",   "yOff",   0,    true)
+        elseif gType == "AutoCast" then
+            numRow("Particles",  "particles", 4,    true)
+            numRow("Frequency",  "freq",      0.125, false)
+            numRow("Scale",      "scale",     1,    false)
+            numRow("X Offset",   "xOff",      0,    true)
+            numRow("Y Offset",   "yOff",      0,    true)
+        elseif gType == "Proc" then
+            boolRow("Start Anim", "startAnim")
+            numRow("Duration",   "duration", 1, false)
+            numRow("X Offset",   "xOff",     0, true)
+            numRow("Y Offset",   "yOff",     0, true)
+        elseif gType == "Button" then
+            boolRow("Start Anim", "startAnim")
+            numRow("X Offset",   "xOff", 0, true)
+            numRow("Y Offset",   "yOff", 0, true)
+        end
+    end
 
     p:SetHeight(-y + PAD)
     return p
@@ -720,7 +896,7 @@ function BuildSubmoduleList()
 
         if expandedUID == uid then
             local panel
-            if kind == "Glow"  then panel = CreateGlowPanel(subContent, sc) end
+            if kind == "Glow"  then panel = CreateGlowPanel(subContent, sc, spellID) end
             if kind == "Sound" then panel = CreateSoundPanel(subContent, sc) end
             if kind == "Event" then panel = CreateEventPanel(subContent, sc) end
             panel:SetPoint("TOPLEFT", 0, yOff)
