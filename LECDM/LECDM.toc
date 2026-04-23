@@ -1,4 +1,4 @@
-## Interface: 120000, 120001
+## Interface: 120000, 120001, 120005
 ## Title: Leaky EnhancedCDM
 ## Notes: Enhancements to any CDM Module for glows, sounds and more.
 ## Author: Leaky-BleedingHollow

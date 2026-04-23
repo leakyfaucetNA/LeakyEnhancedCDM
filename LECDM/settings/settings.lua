@@ -99,6 +99,16 @@ local function MakeAccentButton(parent, text, w, h)
     return b
 end
 
+local C_DANGER = {0.65, 0.20, 0.20, 1}
+
+local function MakeDangerButton(parent, text, w, h)
+    local b = MakeButton(parent, text, w, h)
+    b:SetBackdropColor(unpack(C_DANGER))
+    b:SetScript("OnEnter", function(s) s:SetBackdropColor(0.85, 0.30, 0.30, 1) end)
+    b:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(C_DANGER)) end)
+    return b
+end
+
 local function MakeCheck(parent)
     local c = CreateFrame("Frame", nil, parent, "BackdropTemplate")
     SetBD(c, C_ELEM, C_BDR)
@@ -364,6 +374,40 @@ local function RefreshAll()
 end
 
 -- -------------------------------------------------- --
+--  Delete-with-confirm                               --
+-- -------------------------------------------------- --
+
+-- Single StaticPopup shared by every sub-module's Delete button. Data-driven
+-- message and callback so the same dialog works for Glow/Sound/Event/Text.
+StaticPopupDialogs["LECDM_DELETE_SUBMODULE"] = {
+    text         = "Delete this %s?\n\nThis cannot be undone.",
+    button1      = YES,
+    button2      = NO,
+    timeout      = 0,
+    whileDead    = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+    OnAccept = function(_, data)
+        if data and data.onConfirm then data.onConfirm() end
+    end,
+}
+
+-- Show the confirm popup for a sub-module. Caller passes the kind string
+-- (for the prompt) and the callback to run on YES.
+local function ConfirmDeleteSubmodule(kind, onConfirm)
+    StaticPopup_Show("LECDM_DELETE_SUBMODULE", kind, nil, { onConfirm = onConfirm })
+end
+
+-- Actual deletion: remove from the right sub-table, collapse the row if it
+-- was expanded, rebuild lookups and the accordion.
+local function DeleteSubmodule(item, kind, uid)
+    if kind == "Glow"  then item.glows  = item.glows  or {}; item.glows[uid]  = nil end
+    if kind == "Sound" then item.sounds = item.sounds or {}; item.sounds[uid] = nil end
+    if kind == "Event" then item.events = item.events or {}; item.events[uid] = nil end
+    if kind == "Text"  then item.texts  = item.texts  or {}; item.texts[uid]  = nil end
+end
+
+-- -------------------------------------------------- --
 --  Option panels                                     --
 -- -------------------------------------------------- --
 
@@ -397,8 +441,25 @@ end
 -- only apply when repeat mode isn't "once").
 local BuildSubmoduleList
 
+-- Append a red Delete button to a sub-module panel, centered at the bottom.
+-- Returns the new y offset (already decremented for the button row + padding).
+local function AppendDeleteButton(p, y, kind, item, uid)
+    y = y - 4
+    local del = MakeDangerButton(p, "Delete " .. kind, 180, 24)
+    del:SetPoint("TOP", p, "TOP", 0, y)
+    del:SetScript("OnClick", function()
+        ConfirmDeleteSubmodule(kind, function()
+            DeleteSubmodule(item, kind, uid)
+            if expandedUID == uid then expandedUID = nil end
+            RefreshAll()
+            BuildSubmoduleList()
+        end)
+    end)
+    return y - 28
+end
+
 -- Build glow options panel.
-local function CreateGlowPanel(parent, gc, itemSpellID)
+local function CreateGlowPanel(parent, gc, itemSpellID, item, uid)
     local p = MakePanel(parent, C_PANEL, C_BDR)
     local y = -PAD
 
@@ -680,11 +741,12 @@ local function CreateGlowPanel(parent, gc, itemSpellID)
         end
     end
 
+    y = AppendDeleteButton(p, y, "Glow", item, uid)
     p:SetHeight(-y + PAD)
     return p
 end
 
-local function CreateSoundPanel(parent, sc)
+local function CreateSoundPanel(parent, sc, item, uid)
     local p = MakePanel(parent, C_PANEL, C_BDR)
     local y = -PAD
 
@@ -790,11 +852,12 @@ local function CreateSoundPanel(parent, sc)
         y = y - 30
     end
 
+    y = AppendDeleteButton(p, y, "Sound", item, uid)
     p:SetHeight(-y + PAD)
     return p
 end
 
-local function CreateEventPanel(parent, ec)
+local function CreateEventPanel(parent, ec, item, uid)
     local p = MakePanel(parent, C_PANEL, C_BDR)
     local y = -PAD
 
@@ -836,6 +899,7 @@ local function CreateEventPanel(parent, ec)
     end)
     y = y - 30
 
+    y = AppendDeleteButton(p, y, "Event", item, uid)
     p:SetHeight(-y + PAD)
     return p
 end
@@ -846,7 +910,7 @@ local ANCHOR_POINTS = {
     "BOTTOMLEFT", "BOTTOM", "BOTTOMRIGHT",
 }
 
-local function CreateTextPanel(parent, tc, uid, itemSpellID)
+local function CreateTextPanel(parent, tc, uid, itemSpellID, item)
     local p = MakePanel(parent, C_PANEL, C_BDR)
     local y = -PAD
 
@@ -1110,6 +1174,7 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID)
     sw:SetPoint("TOPLEFT", PAD + 108, y + 2)
     y = y - 30
 
+    y = AppendDeleteButton(p, y, "Text", item, uid)
     p:SetHeight(-y + PAD)
     return p
 end
@@ -1154,15 +1219,15 @@ function BuildSubmoduleList()
         row.text:SetText(kind .. ": " .. (sc.name or "(unnamed)"))
         row.text:SetTextColor(unpack(sc.enabled ~= false and C_TEXT or C_DIM))
 
-        local del = MakeButton(row, "x", 22, 18)
+        local del = MakeDangerButton(row, "x", 22, 18)
         del:SetPoint("RIGHT", -6, 0)
         del:SetScript("OnClick", function()
-            if kind == "Glow"  then item.glows[uid]  = nil end
-            if kind == "Sound" then item.sounds[uid] = nil end
-            if kind == "Event" then item.events[uid] = nil end
-            if expandedUID == uid then expandedUID = nil end
-            RefreshAll()
-            BuildSubmoduleList()
+            ConfirmDeleteSubmodule(kind, function()
+                DeleteSubmodule(item, kind, uid)
+                if expandedUID == uid then expandedUID = nil end
+                RefreshAll()
+                BuildSubmoduleList()
+            end)
         end)
 
         row:SetScript("OnClick", function()
@@ -1175,10 +1240,10 @@ function BuildSubmoduleList()
 
         if expandedUID == uid then
             local panel
-            if kind == "Glow"  then panel = CreateGlowPanel(subContent, sc, spellID) end
-            if kind == "Sound" then panel = CreateSoundPanel(subContent, sc) end
-            if kind == "Event" then panel = CreateEventPanel(subContent, sc) end
-            if kind == "Text"  then panel = CreateTextPanel(subContent, sc, uid, spellID) end
+            if kind == "Glow"  then panel = CreateGlowPanel(subContent, sc, spellID, item, uid) end
+            if kind == "Sound" then panel = CreateSoundPanel(subContent, sc, item, uid) end
+            if kind == "Event" then panel = CreateEventPanel(subContent, sc, item, uid) end
+            if kind == "Text"  then panel = CreateTextPanel(subContent, sc, uid, spellID, item) end
             panel:SetPoint("TOPLEFT", 0, yOff)
             panel:SetPoint("TOPRIGHT", 0, yOff)
             table.insert(subPanels, panel)

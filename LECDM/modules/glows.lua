@@ -61,6 +61,17 @@ end
 function ns.ShouldLoadItem(db, itemID)
     local item = db.profile.items[itemID]
     if not item or item.enabled == false then return false end
+
+    -- Spec filter: items are created per-spec in the settings UI (GetOrCreateItem
+    -- stamps item.specID). Without this check, items configured for other specs
+    -- would still load on the current spec, resulting in duplicate glows/sounds/
+    -- events/texts firing for the same spell.
+    if item.specID then
+        local activeIdx = GetSpecialization and GetSpecialization()
+        local activeSpec = activeIdx and GetSpecializationInfo and GetSpecializationInfo(activeIdx)
+        if activeSpec and item.specID ~= activeSpec then return false end
+    end
+
     local groupID = item.parentGroup
     while groupID do
         local group = db.profile.groups[groupID]
