@@ -42,6 +42,54 @@ function ns.GetSpellName(id)
     return info and info.name or nil
 end
 
+-- -------------------------------------------------- --
+--  Public API                                        --
+-- -------------------------------------------------- --
+
+-- Other addons can access this via:
+--     local LECDM = LibStub("AceAddon-3.0"):GetAddon("LECDM", true)
+--     if LECDM and LECDM.API then
+--         local frame = LECDM.API.GetFrame("aura", "Spiritfont")
+--     end
+--
+-- Or directly via the global `LECDM.API.GetFrame(kind, name)`.
+LECDM.API = LECDM.API or {}
+
+-- Returns the live CDM pool frame that corresponds to the given spell name
+-- from the aura or CD map, or nil if not found. Spell name matching is exact
+-- (Blizzard's C_Spell.GetSpellName value). Accepts either the base name or
+-- an override name (e.g. "Word of Glory" or "Eternal Flame") — the map stores
+-- both as keys to the same entry.
+--
+-- Returned frame is a live CDM pool frame parented under its viewer. The
+-- caller SHOULD treat it as read-only / anchor-target only; parenting or
+-- mutating it risks taint. Use it like the glow overlay pattern:
+--     CreateFrame("Frame", nil, UIParent):SetPoint("CENTER", frame, "CENTER")
+--
+-- The frame ref may be hidden if the spell isn't currently displayed; check
+-- :IsShown() if that matters to your use case.
+--
+-- @param kind  "aura" | "cd"  (aliases: "auras", "cds", "cooldown")
+-- @param name  spell name string
+-- @return Frame|nil
+function LECDM.API.GetFrame(kind, name)
+    if type(kind) ~= "string" or type(name) ~= "string" or name == "" then
+        return nil
+    end
+
+    local map
+    if kind == "aura" or kind == "auras" then
+        map = ns.auraFrameMap
+    elseif kind == "cd" or kind == "cds" or kind == "cooldown" or kind == "cooldowns" then
+        map = ns.cdFrameMap
+    end
+    if not map then return nil end
+
+    local entry = map[name]
+    if entry and entry.frame then return entry.frame end
+    return nil
+end
+
 -- Does the saved DB have any enabled+loadable item of the given type that has
 -- at least one configured sub-module (glow/sound/event)? Used to skip the
 -- associated tracker's event registration and frame hooks when nothing is

@@ -115,94 +115,128 @@ function ns.BuildActiveItemLookup(db)
 end
 
 -- -------------------------------------------------- --
---  Stack Detection                                   --
+--  Threshold Detection (stacks + charges)            --
 -- -------------------------------------------------- --
+--
+-- Same StatusBar-based trick for both aura stack counts and CD charge counts.
+-- The secret value (aura.applications or spellCharges.currentCharges) is fed
+-- into a StatusBar via SetValue — no read or compare of the value itself.
+-- GetStatusBarTexture():IsShown() then returns a plain boolean we can branch
+-- on without tainting, answering "is the value at or above minVal+1?".
+--
+-- Two independent source tables keep stacks and charges from interfering.
+-- Auras come from LEC_AURA_ADDED/UPDATED; charges come from SPELL_UPDATE_CHARGES.
 
-local stackDetectionDisabled = false
-local stackDetectorUID       = 0
-local stackDetectors         = {}  -- [spellID][minVal] = StatusBar
-local cachedApplications     = {}  -- [spellID] = applications (secret value)
+local thresholdDisabled = false
+local detectorUID       = 0
 
-local function CreateStackDetector(spellID, minVal)
-    stackDetectorUID = stackDetectorUID + 1
-    local bar = CreateFrame("StatusBar", "LECDMStackDetector_" .. stackDetectorUID, UIParent)
+local sources = {
+    stack  = { cache = {}, bars = {} },  -- [spellID][minVal] = bar;  cache[spellID] = value
+    charge = { cache = {}, bars = {} },
+}
+
+local function CreateDetector(source, spellID, minVal)
+    detectorUID = detectorUID + 1
+    local bar = CreateFrame("StatusBar", "LECDMThresholdDetector_" .. detectorUID, UIParent)
     bar:SetSize(1, 1)
     bar:SetPoint("TOPLEFT", UIParent, "TOPLEFT", -500, 500)
     bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
     bar:SetAlpha(0)
     bar:Show()
     bar:SetMinMaxValues(minVal, minVal + 1)
-    bar:SetValue(cachedApplications[spellID] or 0)
+    bar:SetValue(source.cache[spellID] or 0)
     return bar
 end
 
-local function GetStackDetector(spellID, minVal)
-    stackDetectors[spellID] = stackDetectors[spellID] or {}
-    if not stackDetectors[spellID][minVal] then
-        stackDetectors[spellID][minVal] = CreateStackDetector(spellID, minVal)
+local function GetDetector(source, spellID, minVal)
+    source.bars[spellID] = source.bars[spellID] or {}
+    if not source.bars[spellID][minVal] then
+        source.bars[spellID][minVal] = CreateDetector(source, spellID, minVal)
     end
-    return stackDetectors[spellID][minVal]
+    return source.bars[spellID][minVal]
 end
 
-local function UpdateSpellStacks(spellID, secretApps)
-    if stackDetectionDisabled then return end
-    cachedApplications[spellID] = secretApps
-    if stackDetectors[spellID] then
-        for _, bar in pairs(stackDetectors[spellID]) do bar:SetValue(secretApps) end
-    end
-end
-
-local function ClearSpellStacks(spellID)
-    cachedApplications[spellID] = nil
-    if stackDetectors[spellID] then
-        for _, bar in pairs(stackDetectors[spellID]) do bar:SetValue(0) end
+local function UpdateSource(source, spellID, secretValue)
+    if thresholdDisabled then return end
+    source.cache[spellID] = secretValue
+    if source.bars[spellID] then
+        for _, bar in pairs(source.bars[spellID]) do bar:SetValue(secretValue) end
     end
 end
 
-local function CheckStackBar(spellID, minVal)
-    if stackDetectionDisabled then return true end
-    local result = GetStackDetector(spellID, minVal):GetStatusBarTexture():IsShown()
-    if issecretvalue(result) then
-        stackDetectionDisabled = true
-        ns.lpmsg("Stack detection unavailable — update your triggers to remove stack thresholds.")
+local function ClearSource(source, spellID)
+    source.cache[spellID] = nil
+    if source.bars[spellID] then
+        for _, bar in pairs(source.bars[spellID]) do bar:SetValue(0) end
+    end
+end
+
+local function CheckBar(source, spellID, minVal)
+    if thresholdDisabled then return true end
+    -- Use GetStatusBarTexture():GetWidth() rather than :IsShown(). IsShown
+    -- continues to return true at zero width in current WoW versions, so it
+    -- doesn't actually distinguish "value above min" from "value at min".
+    -- GetWidth collapses to 0 when SetValue == min, which IS the signal we
+    -- want. Width is a plain number (not secret) even when fed a secret value.
+    local width = GetDetector(source, spellID, minVal):GetStatusBarTexture():GetWidth() or 0
+    local result = width > 0.01
+    if issecretvalue and issecretvalue(result) then
+        thresholdDisabled = true
+        ns.lpmsg("Threshold detection unavailable — update your triggers to remove thresholds.")
         return true
     end
     return result
 end
 
-local function IsStackThresholdMet(spellID, threshold, comparison)
+-- Generic threshold check. `assumeWhenEmpty` is the value to assume when the
+-- cache has no data yet (1 for stacks because an active aura has ≥1 stack by
+-- definition; 0 for charges because an unknown-state charge spell shouldn't
+-- trigger a positive "≥N charges" threshold).
+local function IsThresholdMet(source, spellID, threshold, comparison, assumeWhenEmpty)
     if not threshold or threshold <= 0 then return true end
-    if stackDetectionDisabled then return true end
+    if thresholdDisabled then return true end
     comparison = comparison or ">="
 
-    if not cachedApplications[spellID] then
-        -- No cached data yet — assume 1 stack and compare
-        local stacks = 1
-        if comparison == ">=" then return stacks >= threshold
-        elseif comparison == ">" then return stacks > threshold
-        elseif comparison == "<" then return stacks < threshold
-        elseif comparison == "<=" then return stacks <= threshold
-        elseif comparison == "=" then return stacks == threshold
+    local function compare(value)
+        if comparison == ">=" then return value >= threshold
+        elseif comparison == ">"  then return value >  threshold
+        elseif comparison == "<"  then return value <  threshold
+        elseif comparison == "<=" then return value <= threshold
+        elseif comparison == "="  then return value == threshold
         else return true end
     end
 
-    -- Single-stack auras: CheckStackBar(0) is false when only 1 stack is present
-    if not CheckStackBar(spellID, 0) then
-        local stacks = 1
-        if comparison == ">=" then return stacks >= threshold
-        elseif comparison == ">" then return stacks > threshold
-        elseif comparison == "<" then return stacks < threshold
-        elseif comparison == "<=" then return stacks <= threshold
-        elseif comparison == "=" then return stacks == threshold
-        else return true end
+    if not source.cache[spellID] then
+        return compare(assumeWhenEmpty or 0)
     end
 
-    if comparison == ">=" then return CheckStackBar(spellID, threshold - 1)
-    elseif comparison == ">" then return CheckStackBar(spellID, threshold)
-    elseif comparison == "<" then return not CheckStackBar(spellID, threshold - 1)
-    elseif comparison == "<=" then return not CheckStackBar(spellID, threshold)
-    elseif comparison == "=" then return CheckStackBar(spellID, threshold - 1) and not CheckStackBar(spellID, threshold)
+    -- When CheckBar(0) is false the fed value is at (or below) the
+    -- assume-when-empty baseline — stacks=1 (active aura always ≥1),
+    -- charges=0. Fall back to direct compare.
+    if not CheckBar(source, spellID, 0) then
+        return compare(assumeWhenEmpty or 0)
+    end
+
+    if comparison == ">=" then return CheckBar(source, spellID, threshold - 1)
+    elseif comparison == ">"  then return CheckBar(source, spellID, threshold)
+    elseif comparison == "<"  then return not CheckBar(source, spellID, threshold - 1)
+    elseif comparison == "<=" then return not CheckBar(source, spellID, threshold)
+    elseif comparison == "="  then return CheckBar(source, spellID, threshold - 1)
+                                     and not CheckBar(source, spellID, threshold)
     else return true end
+end
+
+-- Public facades preserved for clarity at call sites.
+local function UpdateSpellStacks(spellID, secretApps)  UpdateSource(sources.stack, spellID, secretApps) end
+local function ClearSpellStacks(spellID)               ClearSource(sources.stack, spellID) end
+local function IsStackThresholdMet(spellID, threshold, comparison)
+    return IsThresholdMet(sources.stack, spellID, threshold, comparison, 1)
+end
+
+local function UpdateSpellCharges(spellID, secretCharges) UpdateSource(sources.charge, spellID, secretCharges) end
+local function ClearSpellCharges(spellID)                 ClearSource(sources.charge, spellID) end
+local function IsChargeThresholdMet(spellID, threshold, comparison)
+    return IsThresholdMet(sources.charge, spellID, threshold, comparison, 0)
 end
 
 -- -------------------------------------------------- --
@@ -211,24 +245,56 @@ end
 
 -- Given a spell ID (number) or frame name (string), return the live CDM pool frame.
 -- cooldownID non-nil = frame is active. Stale refs trigger a one-shot reseed + retry.
+-- Live-scan the CDM viewers for a pool frame currently displaying spellID.
+-- Used as a fallback when the cached entry.frame is nil (CDM addon reparented
+-- frames out of the viewer hierarchy before we captured them).
+local VIEWER_NAMES_SCAN = {
+    "EssentialCooldownViewer", "UtilityCooldownViewer",
+    "BuffIconCooldownViewer",  "BuffBarCooldownViewer",
+}
+local function LiveScanForSpellID(spellID)
+    for _, name in ipairs(VIEWER_NAMES_SCAN) do
+        local viewer = _G[name]
+        if viewer then
+            for _, child in ipairs({ viewer:GetChildren() }) do
+                local ci = child.cooldownInfo
+                if ci and (ci.spellID == spellID or ci.overrideSpellID == spellID) then
+                    return child
+                end
+            end
+        end
+    end
+end
+
+-- Relaxed cooldownID gate: some CDM addons (ArcUI etc.) reparent pool frames
+-- out of the native viewer hierarchy, which can leave frame.cooldownID
+-- transient/nil even for spells that always display. Accept any cached
+-- entry.frame and fall back to a live viewer scan before giving up.
 local function ResolveGlowTarget(frameKey)
     if type(frameKey) == "number" then
         local entry
         for _, map in ipairs({ ns.cdFrameMap, ns.auraFrameMap }) do
             for _, e in pairs(map) do
-                if e._lecSpellID == frameKey then entry = e; break end
+                if e._lecSpellID == frameKey or e._lecOverrideID == frameKey then
+                    entry = e; break
+                end
             end
             if entry then break end
         end
 
-        if entry and entry.frame and entry.frame.cooldownID then return entry.frame end
-        if entry and entry.frame and ns.isConfigOpen then return entry.frame end
+        if entry and entry.frame then return entry.frame end
+
+        local scanned = LiveScanForSpellID(frameKey)
+        if scanned then
+            if entry then entry.frame = scanned end  -- backfill cache
+            return scanned
+        end
 
         if entry and not hasReseeded then
             hasReseeded = true
-            ns.lpmsg("ResolveGlowTarget: stale frame spellID=" .. frameKey .. ", reseeding", "DEBUG")
+            ns.lpmsg("ResolveGlowTarget: missing frame spellID=" .. frameKey .. ", reseeding", "DEBUG")
             ns.AuraTracker:SeedFrames()
-            if entry.frame and entry.frame.cooldownID then return entry.frame end
+            if entry.frame then return entry.frame end
             if not pendingReseed then
                 pendingReseed = true
                 C_Timer.After(0.5, function()
@@ -245,13 +311,12 @@ local function ResolveGlowTarget(frameKey)
     local g = _G[frameKey]
     if g then return g end
     local entry = ns.cdFrameMap[frameKey] or ns.auraFrameMap[frameKey]
-    if entry and entry.frame and entry.frame.cooldownID then return entry.frame end
-    if entry and entry.frame and ns.isConfigOpen then return entry.frame end
+    if entry and entry.frame then return entry.frame end
     if entry and not hasReseeded then
         hasReseeded = true
-        ns.lpmsg("ResolveGlowTarget: stale frame '" .. frameKey .. "', reseeding", "DEBUG")
+        ns.lpmsg("ResolveGlowTarget: missing frame '" .. frameKey .. "', reseeding", "DEBUG")
         ns.AuraTracker:SeedFrames()
-        if entry.frame and entry.frame.cooldownID then return entry.frame end
+        if entry.frame then return entry.frame end
         if not pendingReseed then
             pendingReseed = true
             C_Timer.After(0.5, function()
@@ -349,11 +414,26 @@ function ns.ToggleGlow(target, config, isNowActive)
     if not glowTarget._lecKeys then glowTarget._lecKeys = {} end
     ns.FrameRegistry[glowTarget] = true
 
+    -- Idempotency short-circuit: skip if the glow is already in the requested
+    -- state with the same type. Prior behavior restarted the glow on every
+    -- call which (a) produced the "STOP/START" debug spam and (b) caused
+    -- visible stuttering when an already-active glow got re-evaluated every
+    -- frame during UNIT_AURA storms. Proc-style re-triggers still work
+    -- because they either change lcgType or go through a full stop first
+    -- (isNowActive=false, then true).
+    local currentType = glowTarget._lecKeys[k]
+    if isNowActive and currentType == lcgType then
+        if config.safeGlow then UpdateOverlaySize(glowTarget, target) end
+        return
+    end
+    if not isNowActive and not currentType then
+        return
+    end
+
     if isNowActive then
         ns.lpmsg("Glow START: " .. (target._lecName or "?") .. " type=" .. gType .. " key=" .. k, "DEBUG")
         if config.safeGlow then UpdateOverlaySize(glowTarget, target) end
 
-        local currentType = glowTarget._lecKeys[k]
         if currentType then
             local stopFn = currentType .. "Glow_Stop"
             if LCG[stopFn] then LCG[stopFn](glowTarget, k) end
@@ -379,17 +459,9 @@ function ns.ToggleGlow(target, config, isNowActive)
         glowTarget._lecKeys[k] = lcgType
     else
         ns.lpmsg("Glow STOP: " .. (target._lecName or "?") .. " key=" .. k, "DEBUG")
-        local typeToStop = glowTarget._lecKeys and glowTarget._lecKeys[k]
-        if typeToStop then
-            local stopFn = typeToStop .. "Glow_Stop"
-            if LCG[stopFn] then LCG[stopFn](glowTarget, k) end
-        else
-            for _, gt in ipairs(GLOW_TYPES) do
-                local stopFn = gt .. "Glow_Stop"
-                if LCG[stopFn] then LCG[stopFn](glowTarget, k) end
-            end
-        end
-        if glowTarget._lecKeys then glowTarget._lecKeys[k] = nil end
+        local stopFn = currentType .. "Glow_Stop"
+        if LCG[stopFn] then LCG[stopFn](glowTarget, k) end
+        glowTarget._lecKeys[k] = nil
     end
 end
 
@@ -397,13 +469,13 @@ end
 --  shouldGlow Helper                                 --
 -- -------------------------------------------------- --
 
-local function ComputeShouldGlow(isEnabled, isPreview, isInverse, isActive, stackThreshold, stackComparison, spellID)
+local function ComputeShouldGlow(isEnabled, isPreview, isInverse, isActive, threshold, comparison, spellID, thresholdFn)
     if not isEnabled then return false end
     if ns.isConfigOpen and not isPreview then return false end
     if isPreview then return true end
     local active = isInverse and (not isActive) or isActive
-    if active and not isInverse and stackThreshold and stackThreshold > 0 and spellID then
-        active = IsStackThresholdMet(spellID, stackThreshold, stackComparison)
+    if active and not isInverse and threshold and threshold > 0 and spellID and thresholdFn then
+        active = thresholdFn(spellID, threshold, comparison)
     end
     return active
 end
@@ -419,15 +491,23 @@ local INVERSE_TRIGGERS = { onRemove = true, onUsed = true }
 
 local function ProcessGlowTrigger(item, spellID, isActive)
     if type(item.glows) == "table" then
+        -- Threshold source depends on the item type: aura items check stack
+        -- counts via applications; CD items check charge counts.
+        local thresholdFn = (item.type == "cdTrigger") and IsChargeThresholdMet
+                                                       or IsStackThresholdMet
         for uid, gc in pairs(item.glows) do
             if gc.enabled ~= false then
-                local target = ResolveGlowTarget(gc.frameKey)
+                -- frameKey=nil means "use this spell's own frame" (the default
+                -- target choice in the settings UI). Fall back to the item's
+                -- spellID so the resolver has something to look up.
+                local target = ResolveGlowTarget(gc.frameKey or spellID)
                 if target then
                     local inverse = INVERSE_TRIGGERS[gc.triggerOn] == true
                     local shouldGlow = ComputeShouldGlow(
                         true, gc.preview or false,
                         inverse,
-                        isActive, gc.showAtStacks, gc.stackComparison, spellID)
+                        isActive, gc.showAtStacks, gc.stackComparison, spellID,
+                        thresholdFn)
                     gc.spellID  = spellID
                     gc.safeGlow = true  -- CDM frames always need UIParent overlay
                     gc.key      = uid   -- use UID as the LCG key so instances don't collide
@@ -558,6 +638,142 @@ end
 --  Public Setup / Teardown                           --
 -- -------------------------------------------------- --
 
+-- Two paths feed our charge bars:
+--
+-- 1. SPELL_UPDATE_CHARGES event — fires for spells that have native charges
+--    (maxCharges > 1). We iterate tracked CD items and refresh.
+--
+-- 2. CooldownViewerCooldownItemMixin:RefreshSpellChargeInfo hook — CDM's own
+--    per-frame refresh method. Needed for spells whose "charges" come from
+--    cast count instead of native charges (e.g. Mana Tea stacks). CDM itself
+--    falls back to C_Spell.GetSpellCastCount(spellID) in this case, and we
+--    mirror that fallback so our threshold bars see the same count.
+--
+-- Both paths call RefreshChargesForSpell, which tries GetSpellCharges first,
+-- then GetSpellCastCount. Value is passed through SetValue on the StatusBar
+-- without ever being read or compared.
+local chargeEventFrame = CreateFrame("Frame")
+local mixinChargeHooked = false
+
+-- isActive depends on item type:
+--   auraTrigger → aura currently applied (reverseLookup[spellID] non-nil)
+--   cdTrigger   → spell currently ready to cast (not in cdStateDB)
+-- Mixing these (e.g. reverseLookup for CD items) skips the threshold check
+-- entirely because active=false short-circuits ComputeShouldGlow. That breaks
+-- charge-threshold glows for CD spells that are passively holding charges
+-- (Mana Tea etc.) — no LEC_CD_* event ever fires to refresh them.
+local function IsItemActive(item, spellID)
+    if item.type == "auraTrigger" then
+        return ns.reverseLookup[spellID] ~= nil
+    end
+    return not ns.cdStateDB[spellID]
+end
+
+local function IsCDItem(spellID)
+    local items = activeItemLookup[spellID]
+    if not items then return false end
+    for _, item in pairs(items) do
+        if item.type == "cdTrigger" then return true end
+    end
+    return false
+end
+
+local function RefreshChargesForSpell(spellID)
+    if not spellID then return end
+    local info = C_Spell.GetSpellCharges and C_Spell.GetSpellCharges(spellID)
+    if info and info.maxCharges and info.maxCharges > 1 and info.currentCharges then
+        UpdateSpellCharges(spellID, info.currentCharges)
+        return
+    end
+    -- Fallback for cast-count spells (Mana Tea, etc.).
+    if C_Spell.GetSpellCastCount then
+        local count = C_Spell.GetSpellCastCount(spellID)
+        if count then
+            UpdateSpellCharges(spellID, count)
+        end
+    end
+end
+
+local function RefreshAllCharges()
+    if not LECDM or not LECDM.db then return end
+    for spellID in pairs(activeItemLookup) do
+        if IsCDItem(spellID) then
+            RefreshChargesForSpell(spellID)
+        end
+    end
+    ns.RefreshAllGlows()
+end
+
+-- UNIT_AURA on player is the fastest signal that a cast-count spell's hidden
+-- stack aura changed — we see it before CDM's own refresh cycle propagates.
+-- Throttle to one refresh per frame via a scheduled flag: UNIT_AURA can fire
+-- several times in a single tick (one per aura event), so batching avoids N
+-- redundant passes.
+--
+-- Short-circuit: UNIT_AURA refresh only matters for CD glows with a threshold.
+-- `hasChargeThreshold` is recomputed once per SetupGlows and gates the handler
+-- so idle configs pay zero cost even in UNIT_AURA-heavy combat.
+local auraRefreshScheduled  = false
+local hasChargeThreshold    = false
+
+local function RecomputeHasChargeThreshold()
+    hasChargeThreshold = false
+    for _, items in pairs(activeItemLookup) do
+        for _, item in pairs(items) do
+            if item.type == "cdTrigger" and type(item.glows) == "table" then
+                for _, gc in pairs(item.glows) do
+                    if gc.showAtStacks and gc.showAtStacks > 0 then
+                        hasChargeThreshold = true
+                        return
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function ScheduleChargeRefresh()
+    if not hasChargeThreshold then return end
+    if auraRefreshScheduled then return end
+    auraRefreshScheduled = true
+    C_Timer.After(0, function()
+        auraRefreshScheduled = false
+        RefreshAllCharges()
+    end)
+end
+
+chargeEventFrame:SetScript("OnEvent", function(_, event)
+    if event == "SPELL_UPDATE_CHARGES" then
+        RefreshAllCharges()
+    elseif event == "UNIT_AURA" then
+        ScheduleChargeRefresh()
+    end
+end)
+
+-- Install the mixin hook once. Guarded so repeated SetupGlows calls don't stack
+-- multiple wrappers on the same method.
+local function EnsureMixinChargeHook()
+    if mixinChargeHooked then return end
+    local mixin = _G.CooldownViewerCooldownItemMixin
+    if not mixin or not mixin.RefreshSpellChargeInfo then return end
+    mixinChargeHooked = true
+    hooksecurefunc(mixin, "RefreshSpellChargeInfo", function(self)
+        local ci = self.cooldownInfo
+        if not ci then return end
+        local spellID = ci.overrideSpellID or ci.spellID
+        if not spellID or not IsCDItem(spellID) then return end
+        RefreshChargesForSpell(spellID)
+        -- Only re-evaluate glows for this spell rather than all, to avoid
+        -- stampeding on CDM's per-frame refresh cycles.
+        local items = activeItemLookup[spellID]
+        if items then
+            for _, item in pairs(items) do
+                ProcessGlowTrigger(item, spellID, IsItemActive(item, spellID))
+            end
+        end
+    end)
+end
+
 function ns.HardResetAllGlows()
     ns.lpmsg("Lifecycle: HardResetAllGlows", "DEBUG")
     ns.AuraTracker:Off("LEC_AURA_ADDED",   "glows")
@@ -565,6 +781,7 @@ function ns.HardResetAllGlows()
     ns.AuraTracker:Off("LEC_AURA_UPDATED", "glows")
     ns.CDTracker:Off("LEC_CD_USED",  "glows")
     ns.CDTracker:Off("LEC_CD_READY", "glows")
+    chargeEventFrame:UnregisterAllEvents()
 
     for frame in pairs(ns.FrameRegistry) do
         if frame then ns.StopAllLcgTypes(frame, nil) end
@@ -575,11 +792,13 @@ function ns.HardResetAllGlows()
     for _, overlay in pairs(glowOverlays) do overlay:Hide() end
     wipe(glowOverlays)
 
-    for _, detectors in pairs(stackDetectors) do
-        for _, bar in pairs(detectors) do bar:Hide() end
+    for _, source in pairs(sources) do
+        for _, detectors in pairs(source.bars) do
+            for _, bar in pairs(detectors) do bar:Hide() end
+        end
+        wipe(source.bars)
+        wipe(source.cache)
     end
-    wipe(stackDetectors)
-    wipe(cachedApplications)
     wipe(activeItemLookup)
     ns.lpmsg("Lifecycle: HardResetAllGlows done", "DEBUG")
 end
@@ -590,6 +809,7 @@ function ns.SetupGlows(addon)
     wipe(pendingChanges)
 
     activeItemLookup = ns.BuildActiveItemLookup(addon.db)
+    RecomputeHasChargeThreshold()
     if not next(activeItemLookup) then
         ns.lpmsg("Lifecycle: SetupGlows — no active items", "DEBUG")
         return
@@ -600,6 +820,11 @@ function ns.SetupGlows(addon)
     ns.AuraTracker:On("LEC_AURA_UPDATED", "glows", OnAuraUpdated)
     ns.CDTracker:On("LEC_CD_USED",  "glows", OnCDUsed)
     ns.CDTracker:On("LEC_CD_READY", "glows", OnCDReady)
+
+    chargeEventFrame:RegisterEvent("SPELL_UPDATE_CHARGES")
+    chargeEventFrame:RegisterUnitEvent("UNIT_AURA", "player")
+    EnsureMixinChargeHook()
+    RefreshAllCharges()  -- initial seed
 
     ns.RefreshAllGlows()
     ns.lpmsg("Lifecycle: SetupGlows done", "DEBUG")
@@ -614,9 +839,8 @@ end
 function ns.RefreshAllGlows()
     hasReseeded = false
     for spellID, itemsForSpell in pairs(activeItemLookup) do
-        local isActive = ns.reverseLookup[spellID] ~= nil
         for _, item in pairs(itemsForSpell) do
-            ProcessGlowTrigger(item, spellID, isActive)
+            ProcessGlowTrigger(item, spellID, IsItemActive(item, spellID))
         end
     end
 end

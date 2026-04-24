@@ -667,6 +667,40 @@ local function CreateGlowPanel(parent, gc, itemSpellID, item, uid)
     end)
     y = y - 30
 
+    -- ---- Stack / Charge threshold ----
+    -- Glow only fires when the current stack (aura) or charge (CD) count
+    -- matches the configured comparison. Threshold 0 = disabled.
+    --
+    -- Runtime uses the StatusBar + secret-value trick in glows.lua — aura
+    -- items compare against auraData.applications, CD items against
+    -- C_Spell.GetSpellCharges(id).currentCharges. Neither value is ever read
+    -- or compared directly.
+    if item and (item.type == "auraTrigger" or item.type == "cdTrigger") then
+        local STACK_COMPS = { ">=", ">", "=", "<=", "<" }
+        local rowLabel = item.type == "cdTrigger" and "Charge Threshold" or "Stack Threshold"
+
+        Row(p, y, rowLabel)
+        local stackE = MakeEdit(p, 60, 22)
+        stackE:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        stackE.edit:SetText(tostring(gc.showAtStacks or 0))
+        stackE.edit:SetScript("OnEditFocusLost", function(e)
+            gc.showAtStacks = tonumber(e:GetText()) or 0
+            RefreshAll()
+        end)
+
+        local cmpDD = MakeDropdown(p, 60, 22)
+        cmpDD:SetPoint("LEFT", stackE, "RIGHT", 8, 0)
+        cmpDD:SetValue(gc.stackComparison or ">=")
+        cmpDD:SetScript("OnClick", function(s)
+            local items = {}
+            for _, c in ipairs(STACK_COMPS) do items[#items + 1] = { label = c, value = c } end
+            s:Open(items, function(v, l)
+                gc.stackComparison = v; cmpDD:SetValue(l); RefreshAll()
+            end)
+        end)
+        y = y - 30
+    end
+
     -- ---- Advanced toggle + per-type tuning ----
     Row(p, y, "Advanced")
     local adv = MakeCheck(p)
@@ -1703,15 +1737,62 @@ end
 --  Public API                                        --
 -- -------------------------------------------------- --
 
+-- Combat lockout: opening the settings window while the player is in combat
+-- is blocked. The request is queued — when PLAYER_REGEN_ENABLED fires we
+-- honor it. Toggle/Close calls during combat short-circuit cleanly.
+local combatQueueFrame = CreateFrame("Frame")
+local pendingAction  -- "open" | "toggle" | nil
+
+local function FlushPendingAction()
+    local action = pendingAction
+    pendingAction = nil
+    if action == "open" then
+        BuildFrame():Show()
+    elseif action == "toggle" then
+        local f = BuildFrame()
+        if f:IsShown() then f:Hide() else f:Show() end
+    end
+end
+
+combatQueueFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+combatQueueFrame:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_REGEN_ENABLED" and pendingAction then
+        FlushPendingAction()
+    end
+end)
+
+local function DeferOrRunNow(action)
+    if InCombatLockdown() then
+        pendingAction = action
+        ns.lpmsg("Settings: deferred until combat ends")
+    else
+        pendingAction = nil
+        if action == "open" then
+            BuildFrame():Show()
+        elseif action == "toggle" then
+            local f = BuildFrame()
+            if f:IsShown() then f:Hide() else f:Show() end
+        end
+    end
+end
+
 function ns.OpenSettings()
-    BuildFrame():Show()
+    DeferOrRunNow("open")
 end
 
 function ns.CloseSettings()
+    -- Close is safe in combat (Hide is allowed) and also cancels any pending
+    -- open so the window doesn't spring back open on PLAYER_REGEN_ENABLED.
+    pendingAction = nil
     if frame then frame:Hide() end
 end
 
 function ns.ToggleSettings()
-    local f = BuildFrame()
-    if f:IsShown() then f:Hide() else f:Show() end
+    -- If the window is already shown, we can always close it safely.
+    if frame and frame:IsShown() then
+        pendingAction = nil
+        frame:Hide()
+        return
+    end
+    DeferOrRunNow("toggle")
 end

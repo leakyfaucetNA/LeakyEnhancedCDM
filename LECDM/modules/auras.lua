@@ -273,6 +273,32 @@ ns.AuraTracker = {
             hooksecurefunc(_G.CooldownViewerMixin, "OnAcquireItemFrame", HookFrame)
             ns.lpmsg("Hooked CooldownViewerMixin.OnAcquireItemFrame", "DEBUG")
         end
+
+        -- Hook CooldownViewerItemDataMixin:SetCooldownID — fires every time CDM
+        -- assigns (or re-assigns) a cooldownID to an item frame. OnAcquireItemFrame
+        -- only catches NEW pool acquisitions; reassignment of an existing frame
+        -- (CDM refresh, layout change, another addon reparenting pool frames
+        -- before we hook the viewer) wouldn't reach our map otherwise. This
+        -- catches every frame→spell binding regardless of parent or ordering.
+        if not hookedViewers["__itemData"] and _G.CooldownViewerItemDataMixin
+           and _G.CooldownViewerItemDataMixin.SetCooldownID then
+            hookedViewers["__itemData"] = true
+            hooksecurefunc(_G.CooldownViewerItemDataMixin, "SetCooldownID", function(itemFrame, newCdID)
+                if not newCdID then return end
+                local info = C_CooldownViewer.GetCooldownViewerCooldownInfo(newCdID)
+                if not info or not info.spellID or info.spellID <= 0 then return end
+                local spellID = info.spellID
+                -- Update the matching entry in whichever map owns this spell.
+                for _, map in ipairs({ ns.cdFrameMap, ns.auraFrameMap }) do
+                    for _, entry in pairs(map) do
+                        if entry._lecSpellID == spellID or entry._lecOverrideID == spellID then
+                            entry.frame = itemFrame
+                        end
+                    end
+                end
+            end)
+            ns.lpmsg("Hooked CooldownViewerItemDataMixin.SetCooldownID", "DEBUG")
+        end
     end,
 
     -- Populate map frame refs from CDM frames already active when maps were built.
