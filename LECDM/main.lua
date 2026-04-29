@@ -215,8 +215,47 @@ function LECDM:GROUP_ROSTER_UPDATE()           ns.SetupAddon(self) end
 --  Initialization                                    --
 -- -------------------------------------------------- --
 
+-- Per-character profile migration.
+-- AceDB collapses defaultProfile=true to "Default" (AceDB-3.0.lua:271), so
+-- every character starts pinned to a single shared "Default" profile. We want
+-- each character to have its own slot so import/export and per-character
+-- customization don't interfere across characters.
+--
+-- Strategy: leave the saved profile data alone, but switch each character to
+-- a profile keyed by "Name - Realm" (AceDB's own char-key format). On first
+-- run, copy whatever was on "Default" so the user keeps their existing config.
+-- The migrated flag lives in db.char (per-character automatic scope), so each
+-- character runs the migration exactly once.
+local function GetCharProfileKey()
+    local name  = UnitName("player")
+    local realm = GetRealmName()
+    if name and realm then return name .. " - " .. realm end
+    return name or "Default"
+end
+
+local function MigrateToCharacterProfile(db)
+    if db.char.charProfileMigrated then return end
+
+    local charKey = GetCharProfileKey()
+    local current = db:GetCurrentProfile()
+
+    if current ~= charKey then
+        local hadProfile = db.profiles[charKey] ~= nil
+        db:SetProfile(charKey)
+        -- If the char-keyed profile is brand new, seed it from the previous
+        -- profile so the user doesn't lose what they had configured.
+        if not hadProfile and current then
+            db:CopyProfile(current, true)
+        end
+        ns.lpmsg("Profile migrated to character-specific: " .. charKey)
+    end
+
+    db.char.charProfileMigrated = true
+end
+
 function LECDM:OnInitialize()
-    self.db = ADB:New("LECDMdb", defaults, true)
+    self.db = ADB:New("LECDMdb", defaults, "Default")
+    MigrateToCharacterProfile(self.db)
     self:RegisterEvent("PLAYER_ENTERING_WORLD")
     self:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
     self:RegisterEvent("PLAYER_TALENT_UPDATE")

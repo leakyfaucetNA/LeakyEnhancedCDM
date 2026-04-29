@@ -667,40 +667,6 @@ local function CreateGlowPanel(parent, gc, itemSpellID, item, uid)
     end)
     y = y - 30
 
-    -- ---- Stack / Charge threshold ----
-    -- Glow only fires when the current stack (aura) or charge (CD) count
-    -- matches the configured comparison. Threshold 0 = disabled.
-    --
-    -- Runtime uses the StatusBar + secret-value trick in glows.lua — aura
-    -- items compare against auraData.applications, CD items against
-    -- C_Spell.GetSpellCharges(id).currentCharges. Neither value is ever read
-    -- or compared directly.
-    if item and (item.type == "auraTrigger" or item.type == "cdTrigger") then
-        local STACK_COMPS = { ">=", ">", "=", "<=", "<" }
-        local rowLabel = item.type == "cdTrigger" and "Charge Threshold" or "Stack Threshold"
-
-        Row(p, y, rowLabel)
-        local stackE = MakeEdit(p, 60, 22)
-        stackE:SetPoint("TOPLEFT", PAD + 108, y + 4)
-        stackE.edit:SetText(tostring(gc.showAtStacks or 0))
-        stackE.edit:SetScript("OnEditFocusLost", function(e)
-            gc.showAtStacks = tonumber(e:GetText()) or 0
-            RefreshAll()
-        end)
-
-        local cmpDD = MakeDropdown(p, 60, 22)
-        cmpDD:SetPoint("LEFT", stackE, "RIGHT", 8, 0)
-        cmpDD:SetValue(gc.stackComparison or ">=")
-        cmpDD:SetScript("OnClick", function(s)
-            local items = {}
-            for _, c in ipairs(STACK_COMPS) do items[#items + 1] = { label = c, value = c } end
-            s:Open(items, function(v, l)
-                gc.stackComparison = v; cmpDD:SetValue(l); RefreshAll()
-            end)
-        end)
-        y = y - 30
-    end
-
     -- ---- Advanced toggle + per-type tuning ----
     Row(p, y, "Advanced")
     local adv = MakeCheck(p)
