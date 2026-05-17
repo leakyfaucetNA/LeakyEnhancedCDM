@@ -102,7 +102,8 @@ local function HasConfigsOfType(itemType)
             if (item.glows  and next(item.glows))
                or (item.sounds and next(item.sounds))
                or (item.events and next(item.events))
-               or (item.texts  and next(item.texts)) then
+               or (item.texts  and next(item.texts))
+               or (item.bars   and next(item.bars)) then
                 return true
             end
         end
@@ -167,10 +168,12 @@ function ns.SetupAddon(addon)
     ns.BuildSpellMap()
     ns.BuildAuraMap()
     ns.UpdateTrackerState()
+    ns.SetupCharges(addon)
     ns.SetupGlows(addon)
     ns.SetupSounds(addon)
     ns.SetupEvents(addon)
     ns.SetupTexts(addon)
+    ns.SetupBars(addon)
 
     executionDepth = executionDepth - 1
     ns.lpmsg("Lifecycle: SetupAddon complete", "DEBUG")
@@ -207,9 +210,30 @@ function LECDM:PLAYER_ENTERING_WORLD()
     end)
 end
 
-function LECDM:PLAYER_SPECIALIZATION_CHANGED() ns.SetupAddon(self) end
-function LECDM:PLAYER_TALENT_UPDATE()          ns.SetupAddon(self) end
-function LECDM:GROUP_ROSTER_UPDATE()           ns.SetupAddon(self) end
+-- Talent / hero-talent swaps within a spec don't reliably fire
+-- PLAYER_TALENT_UPDATE, but they DO fire TRAIT_CONFIG_UPDATED and
+-- COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED — Blizzard's own CDM data provider
+-- listens to those for the same reason (CooldownViewerSettingsDataProvider.lua).
+-- Debounced because a single loadout commit can fire all three events in
+-- rapid succession; coalescing avoids three back-to-back map rebuilds.
+local pendingSetup = false
+local function ScheduleSetup(addon)
+    if pendingSetup then return end
+    pendingSetup = true
+    C_Timer.After(0.1, function()
+        pendingSetup = false
+        ns.SetupAddon(addon)
+    end)
+end
+
+function LECDM:PLAYER_SPECIALIZATION_CHANGED()           ScheduleSetup(self) end
+function LECDM:PLAYER_TALENT_UPDATE()                    ScheduleSetup(self) end
+function LECDM:TRAIT_CONFIG_UPDATED()                    ScheduleSetup(self) end
+function LECDM:COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED()  ScheduleSetup(self) end
+-- SPELLS_CHANGED is what actually lands after a talent commit — the spellbook
+-- refresh that drives C_CooldownViewer's category sets. Without this the
+-- maps were rebuilding on TRAIT_CONFIG_UPDATED but reading the pre-swap data.
+function LECDM:SPELLS_CHANGED()                          ScheduleSetup(self) end
 
 -- -------------------------------------------------- --
 --  Initialization                                    --
@@ -259,7 +283,9 @@ function LECDM:OnInitialize()
     self:RegisterEvent("PLAYER_ENTERING_WORLD")
     self:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
     self:RegisterEvent("PLAYER_TALENT_UPDATE")
-    self:RegisterEvent("GROUP_ROSTER_UPDATE")
+    self:RegisterEvent("TRAIT_CONFIG_UPDATED")
+    self:RegisterEvent("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED")
+    self:RegisterEvent("SPELLS_CHANGED")
 end
 
 function LECDM:OnEnable()

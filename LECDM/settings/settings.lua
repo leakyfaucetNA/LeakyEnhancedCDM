@@ -371,6 +371,7 @@ local function RefreshAll()
     ns.SetupSounds(LECDM)
     ns.SetupEvents(LECDM)
     if ns.SetupTexts then ns.SetupTexts(LECDM) end
+    if ns.SetupBars  then ns.SetupBars(LECDM)  end
 end
 
 -- -------------------------------------------------- --
@@ -405,6 +406,38 @@ local function DeleteSubmodule(item, kind, uid)
     if kind == "Sound" then item.sounds = item.sounds or {}; item.sounds[uid] = nil end
     if kind == "Event" then item.events = item.events or {}; item.events[uid] = nil end
     if kind == "Text"  then item.texts  = item.texts  or {}; item.texts[uid]  = nil end
+    if kind == "Bar"   then item.bars   = item.bars   or {}; item.bars[uid]   = nil end
+end
+
+-- Deep copy used by DuplicateSubmodule. Sub-module configs contain nested
+-- tables (rgba arrays, offset records) so a shallow copy would alias the
+-- original — editing the duplicate would mutate the source.
+local function DeepCopy(v)
+    if type(v) ~= "table" then return v end
+    local out = {}
+    for k, val in pairs(v) do out[k] = DeepCopy(val) end
+    return out
+end
+
+-- Clone a sub-module config under a new UID. Names get a " (Copy)" suffix so
+-- the duplicate is identifiable in the accordion list. Returns the new UID
+-- so the caller can auto-expand the freshly-created row.
+local function DuplicateSubmodule(item, kind, srcUID)
+    local map
+    if     kind == "Glow"  then item.glows  = item.glows  or {}; map = item.glows
+    elseif kind == "Sound" then item.sounds = item.sounds or {}; map = item.sounds
+    elseif kind == "Event" then item.events = item.events or {}; map = item.events
+    elseif kind == "Text"  then item.texts  = item.texts  or {}; map = item.texts
+    elseif kind == "Bar"   then item.bars   = item.bars   or {}; map = item.bars
+    else return nil end
+    local src = map[srcUID]
+    if not src then return nil end
+
+    local newUID  = ns.GenerateUID()
+    local copy    = DeepCopy(src)
+    copy.name     = ((copy.name and copy.name ~= "") and copy.name or kind) .. " (Copy)"
+    map[newUID]   = copy
+    return newUID
 end
 
 -- -------------------------------------------------- --
@@ -492,7 +525,29 @@ local function CreateGlowPanel(parent, gc, itemSpellID, item, uid)
             gc.triggerOn = v; trig:SetValue(l); RefreshAll()
         end)
     end)
+
+    -- Inline "Only in Combat" check beside the Trigger dropdown. When set, the
+    -- glow only fires while the player is in combat (InCombatLockdown).
+    local combatOnly = MakeCheck(p)
+    combatOnly:SetPoint("LEFT", trig, "RIGHT", 12, 0)
+    combatOnly:SetChecked(gc.combatOnly == true)
+    combatOnly.onChanged = function(v) gc.combatOnly = v and true or nil; RefreshAll() end
+    local combatLabel = p:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    combatLabel:SetPoint("LEFT", combatOnly, "RIGHT", 6, 0)
+    combatLabel:SetText("Only in Combat")
+    combatLabel:SetTextColor(unpack(C_TEXT))
     y = y - 30
+
+    -- "Only at Full Charges" — CD items only. Aura applications are secret in
+    -- 12.0+ so full-stack detection isn't reliable for aura items.
+    if item and item.type == "cdTrigger" then
+        Row(p, y, "Only at Full")
+        local atFull = MakeCheck(p)
+        atFull:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        atFull:SetChecked(gc.triggerAtFull == true)
+        atFull.onChanged = function(v) gc.triggerAtFull = v and true or nil; RefreshAll() end
+        y = y - 30
+    end
 
     -- ---- Target picker ----
     -- Dedupe per-map by entry table ref (maps store the same entry under both
@@ -779,6 +834,15 @@ local function CreateSoundPanel(parent, sc, item, uid)
     end)
     y = y - 30
 
+    if item and item.type == "cdTrigger" then
+        Row(p, y, "Only at Full")
+        local atFull = MakeCheck(p)
+        atFull:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        atFull:SetChecked(sc.triggerAtFull == true)
+        atFull.onChanged = function(v) sc.triggerAtFull = v and true or nil; RefreshAll() end
+        y = y - 30
+    end
+
     Row(p, y, "Sound")
     local snd = MakeDropdown(p, 220, 22)
     snd:SetPoint("TOPLEFT", PAD + 108, y + 4)
@@ -889,6 +953,15 @@ local function CreateEventPanel(parent, ec, item, uid)
         end)
     end)
     y = y - 30
+
+    if item and item.type == "cdTrigger" then
+        Row(p, y, "Only at Full")
+        local atFull = MakeCheck(p)
+        atFull:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        atFull:SetChecked(ec.triggerAtFull == true)
+        atFull.onChanged = function(v) ec.triggerAtFull = v and true or nil; RefreshAll() end
+        y = y - 30
+    end
 
     Row(p, y, "Event Name")
     local evE = MakeEdit(p, 260, 22)
@@ -1064,6 +1137,7 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID, item)
         end)
 
         s:Open(items, function(v, l)
+            local wasCustom = tc.anchorCustom == true
             if v == "__custom__" then
                 tc.anchorCustom = true
                 tc.anchorFrame  = ""
@@ -1076,7 +1150,13 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID, item)
             end
             anc:SetValue(l)
             RefreshAll(); refreshPreview()
-            if BuildSubmoduleList then BuildSubmoduleList() end
+            -- Only rebuild the editor panel when we cross the custom/non-custom
+            -- boundary (the custom-anchor EditBox appears/disappears with that
+            -- mode). Skipping the rebuild for ordinary anchor swaps keeps the
+            -- live preview alive across the change.
+            if BuildSubmoduleList and (tc.anchorCustom == true) ~= wasCustom then
+                BuildSubmoduleList()
+            end
         end)
     end)
     y = y - 30
@@ -1180,6 +1260,505 @@ local function CreateTextPanel(parent, tc, uid, itemSpellID, item)
 end
 
 -- -------------------------------------------------- --
+--  Bar panel                                         --
+-- -------------------------------------------------- --
+
+local function CreateBarPanel(parent, bc, uid, itemSpellID, item)
+    local p = MakePanel(parent, C_PANEL, C_BDR)
+    local y = -PAD
+
+    bc.nameText = bc.nameText or {}
+    bc.durText  = bc.durText  or {}
+
+    -- Section header helper
+    local function SectionHeader(text)
+        y = y - 6
+        local fs = MakeLabel(p, text, nil, C_ACCENT)
+        fs:SetPoint("TOPLEFT", PAD, y)
+        y = y - 22
+    end
+
+    -- ---- Header: name + enabled + preview ----
+    Row(p, y, "Name")
+    local nameE = MakeEdit(p, 220, 22)
+    nameE:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    nameE.edit:SetText(bc.name or "")
+    nameE.edit:SetScript("OnEditFocusLost", function(e) bc.name = e:GetText() end)
+    y = y - 30
+
+    -- Read-only frame name: live global the bar is registered under so the
+    -- user can anchor WeakAuras / other addons to it. Derived from bc.name on
+    -- first creation, then cached on bc.frameName and stable forever — so
+    -- renaming the bar doesn't break existing anchors. The Regenerate button
+    -- clears the cache and rebuilds the frame from the current bc.name.
+    if ns.ResolveBarFrameName then
+        Row(p, y, "Frame Name")
+        local fnE = MakeEdit(p, 220, 22)
+        fnE:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        fnE.edit:SetText(ns.ResolveBarFrameName(bc))
+        fnE.edit:SetAutoFocus(false)
+        fnE.edit:SetScript("OnEscapePressed", fnE.edit.ClearFocus)
+        fnE.edit:SetScript("OnEnterPressed",  fnE.edit.ClearFocus)
+        fnE.edit:SetScript("OnTextChanged", function(self, userInput)
+            if userInput then self:SetText(ns.ResolveBarFrameName(bc)) end
+        end)
+
+        local regen = MakeButton(p, "Regenerate", 90, 22)
+        regen:SetPoint("LEFT", fnE, "RIGHT", 6, 0)
+        regen:SetScript("OnClick", function()
+            bc.frameName = nil
+            -- Find the itemID owning this bar so we can release the cached
+            -- frame entry. CreateBarPanel doesn't receive itemID directly, so
+            -- we look it up by table identity — fine, items table is small.
+            local owningItemID
+            for k, v in pairs(LECDM.db.profile.items) do
+                if v == item then owningItemID = k; break end
+            end
+            if ns.ReleaseBarFrame and owningItemID then
+                ns.ReleaseBarFrame(itemSpellID, owningItemID, uid)
+            end
+            RefreshAll()
+            fnE.edit:SetText(ns.ResolveBarFrameName(bc))
+        end)
+        y = y - 30
+    end
+
+    Row(p, y, "Enabled")
+    local en = MakeCheck(p)
+    en:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    en:SetChecked(bc.enabled ~= false)
+    en.onChanged = function(v) bc.enabled = v; RefreshAll() end
+
+    -- Preview state (per-panel closure, like text panel).
+    local stateKey = "__preview_bar_" .. tostring(uid or 0) .. "_" .. tostring(itemSpellID or 0)
+    local previewing = false
+    local previewBtn = MakeButton(p, "Preview", 70, 22)
+    previewBtn:SetPoint("LEFT", en, "RIGHT", 80, 0)
+
+    local previewDurE = MakeEdit(p, 60, 22)
+    previewDurE:SetPoint("LEFT", previewBtn, "RIGHT", 6, 0)
+    previewDurE.edit:SetText("10")
+    local function getPreviewDuration()
+        return tonumber(previewDurE.edit:GetText()) or 10
+    end
+    local previewName = C_Spell.GetSpellName and itemSpellID and C_Spell.GetSpellName(itemSpellID) or "Preview"
+
+    local function stopPreview()
+        if not previewing then return end
+        previewing = false
+        if ns.PreviewBar then ns.PreviewBar(bc, stateKey, false) end
+        previewBtn.text:SetText("Preview")
+    end
+    local function startPreview()
+        previewing = true
+        if ns.PreviewBar then ns.PreviewBar(bc, stateKey, true, getPreviewDuration(), previewName) end
+        previewBtn.text:SetText("Stop")
+    end
+    previewBtn:SetScript("OnClick", function()
+        if previewing then stopPreview() else startPreview() end
+    end)
+    p:HookScript("OnHide", stopPreview)
+
+    local function refreshPreview()
+        if previewing and ns.PreviewBar then
+            ns.PreviewBar(bc, stateKey, true, getPreviewDuration(), previewName)
+        end
+    end
+    previewDurE.edit:SetScript("OnTextChanged", function() refreshPreview() end)
+    y = y - 30
+
+    Row(p, y, "Show Inactive")
+    local showInactive = MakeCheck(p)
+    showInactive:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    showInactive:SetChecked(bc.showWhenInactive == true)
+    showInactive.onChanged = function(v)
+        bc.showWhenInactive = v and true or nil
+        RefreshAll()
+    end
+    local showInactiveLabel = p:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    showInactiveLabel:SetPoint("LEFT", showInactive, "RIGHT", 6, 0)
+    showInactiveLabel:SetText("Display empty when buff not active")
+    showInactiveLabel:SetTextColor(unpack(C_DIM))
+    y = y - 30
+
+    -- Generic factories
+    local function numRow(label, getter, setter, default)
+        Row(p, y, label)
+        local eb = MakeEdit(p, 70, 22)
+        eb:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        eb.edit:SetText(tostring(getter() or default))
+        eb.edit:SetScript("OnEditFocusLost", function(e)
+            local n = tonumber(e:GetText())
+            setter(n or default)
+            RefreshAll(); refreshPreview()
+        end)
+        y = y - 30
+    end
+
+    local function colorRow(label, getter, setter)
+        Row(p, y, label)
+        local sw = MakeColorSwatch(p, getter(), function(r, g, b_, a)
+            setter({r, g, b_, a})
+            RefreshAll(); refreshPreview()
+        end)
+        sw:SetPoint("TOPLEFT", PAD + 108, y + 2)
+        y = y - 30
+    end
+
+    local function checkRow(label, getter, setter)
+        Row(p, y, label)
+        local c = MakeCheck(p)
+        c:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        c:SetChecked(getter() == true)
+        c.onChanged = function(v) setter(v and true or nil); RefreshAll(); refreshPreview() end
+        y = y - 30
+    end
+
+    local function lsmDropdown(label, channel, getter, setter, allowDefault)
+        Row(p, y, label)
+        local dd = MakeDropdown(p, 200, 22)
+        dd:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        dd:SetValue(tostring(getter() or (allowDefault and "(default)" or "")))
+        dd:SetScript("OnClick", function(s)
+            local items = {}
+            if allowDefault then items[#items + 1] = { label = "(default)", value = "__default__" } end
+            local list = LSM and LSM:List(channel) or {}
+            for _, name in ipairs(list) do items[#items + 1] = { label = name, value = name } end
+            s:Open(items, function(v, l)
+                if v == "__default__" then setter(nil) else setter(v) end
+                dd:SetValue(l)
+                RefreshAll(); refreshPreview()
+            end)
+        end)
+        y = y - 30
+    end
+
+    local function pointDropdown(label, getter, setter, default)
+        Row(p, y, label)
+        local dd = MakeDropdown(p, 140, 22)
+        dd:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        dd:SetValue(getter() or default)
+        dd:SetScript("OnClick", function(s)
+            local items = {}
+            for _, pt in ipairs(ANCHOR_POINTS) do items[#items + 1] = { label = pt, value = pt } end
+            s:Open(items, function(v)
+                setter(v); dd:SetValue(v)
+                RefreshAll(); refreshPreview()
+            end)
+        end)
+        y = y - 30
+    end
+
+    -- ---- Bar dimensions ----
+    SectionHeader("Bar")
+    numRow("Width",  function() return bc.width  end, function(v) bc.width  = v end, 200)
+    numRow("Height", function() return bc.height end, function(v) bc.height = v end, 20)
+
+    -- Match Width: optional override that resizes the bar to follow another
+    -- frame's width. When the checkbox is off, the configured Width is used.
+    -- Mode "anchor" (default) follows the bar's own anchor frame; "custom"
+    -- follows a user-named frame entered in the input below.
+    Row(p, y, "Match Width")
+    local matchEn = MakeCheck(p)
+    matchEn:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    matchEn:SetChecked(bc.matchWidth == true)
+    local modeDD = MakeDropdown(p, 140, 22)
+    modeDD:SetPoint("LEFT", matchEn, "RIGHT", 8, 0)
+    local function modeLabel()
+        return (bc.matchWidthMode == "custom") and "Custom" or "Anchor Frame"
+    end
+    modeDD:SetValue(modeLabel())
+    modeDD:SetScript("OnClick", function(s)
+        s:Open({
+            { label = "Anchor Frame", value = "anchor" },
+            { label = "Custom",       value = "custom" },
+        }, function(v, l)
+            bc.matchWidthMode = v
+            modeDD:SetValue(l)
+            RefreshAll(); refreshPreview()
+            if BuildSubmoduleList then BuildSubmoduleList() end  -- show/hide custom-name row
+        end)
+    end)
+    matchEn.onChanged = function(v)
+        bc.matchWidth = v and true or nil
+        RefreshAll(); refreshPreview()
+        if BuildSubmoduleList then BuildSubmoduleList() end
+    end
+    y = y - 30
+
+    -- "Match Frame" name input only when both Match Width is on AND mode is
+    -- Custom. Otherwise this row is omitted entirely.
+    if bc.matchWidth and bc.matchWidthMode == "custom" then
+        Row(p, y, "Match Frame")
+        local mf = MakeEdit(p, 220, 22)
+        mf:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        mf.edit:SetText(tostring(bc.matchWidthFrame or ""))
+        mf.edit:SetScript("OnEditFocusLost", function(e)
+            bc.matchWidthFrame = e:GetText()
+            RefreshAll(); refreshPreview()
+        end)
+        y = y - 30
+    end
+    lsmDropdown("Texture", "statusbar",
+        function() return bc.barTexture end, function(v) bc.barTexture = v end, true)
+    bc.barColor = bc.barColor or {0, 1, 0, 1}
+    colorRow("Color",
+        function() return bc.barColor end, function(v) bc.barColor = v end)
+
+    -- ---- Background ----
+    SectionHeader("Background")
+    lsmDropdown("Texture", "background",
+        function() return bc.bgTexture end, function(v) bc.bgTexture = v end, true)
+    bc.bgColor = bc.bgColor or {0, 0, 0, 0.7}
+    colorRow("Color",
+        function() return bc.bgColor end, function(v) bc.bgColor = v end)
+
+    -- ---- Border ----
+    SectionHeader("Border")
+    numRow("Thickness",
+        function() return bc.borderThickness end, function(v) bc.borderThickness = v end, 1)
+    bc.borderColor = bc.borderColor or {0, 0, 0, 1}
+    colorRow("Color",
+        function() return bc.borderColor end, function(v) bc.borderColor = v end)
+
+    -- ---- Anchor (mirrors text-panel anchor picker shape) ----
+    SectionHeader("Anchor")
+    local function collectAnchorMap(map)
+        local seen, out = {}, {}
+        for name, entry in pairs(map) do
+            if entry._lecSpellID and not seen[entry] then
+                seen[entry] = true
+                out[#out + 1] = { name = name, entry = entry }
+            end
+        end
+        return out
+    end
+    local function buildAnchorNameCount(auraList, cdList)
+        local nameCount = {}
+        for _, rec in ipairs(auraList) do nameCount[rec.name] = (nameCount[rec.name] or 0) + 1 end
+        for _, rec in ipairs(cdList)   do nameCount[rec.name] = (nameCount[rec.name] or 0) + 1 end
+        return nameCount
+    end
+    local function anchorLabel()
+        if bc.anchorCustom then return "(custom)" end
+        if not bc.anchorFrame or bc.anchorFrame == "" then return "UIParent" end
+        if type(bc.anchorFrame) == "number" then
+            local auraList = collectAnchorMap(ns.auraFrameMap or {})
+            local cdList   = collectAnchorMap(ns.cdFrameMap   or {})
+            local nameCount = buildAnchorNameCount(auraList, cdList)
+            for _, rec in ipairs(auraList) do
+                if rec.entry._lecSpellID == bc.anchorFrame then
+                    return (nameCount[rec.name] or 0) > 1 and rec.name .. " (Aura)" or rec.name
+                end
+            end
+            for _, rec in ipairs(cdList) do
+                if rec.entry._lecSpellID == bc.anchorFrame then
+                    return (nameCount[rec.name] or 0) > 1 and rec.name .. " (CD)" or rec.name
+                end
+            end
+            return tostring(bc.anchorFrame)
+        end
+        return tostring(bc.anchorFrame)
+    end
+
+    Row(p, y, "Anchor Frame")
+    local anc = MakeDropdown(p, 220, 22)
+    anc:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    anc:SetValue(anchorLabel())
+    if bc.anchorCustom then
+        local afE = MakeEdit(p, 160, 22)
+        afE:SetPoint("LEFT", anc, "RIGHT", 6, 0)
+        afE.edit:SetText(tostring(bc.anchorFrame or ""))
+        afE.edit:SetScript("OnEditFocusLost", function(e)
+            bc.anchorFrame = e:GetText()
+            RefreshAll(); refreshPreview()
+        end)
+    end
+    anc:SetScript("OnClick", function(s)
+        local auraList = collectAnchorMap(ns.auraFrameMap or {})
+        local cdList   = collectAnchorMap(ns.cdFrameMap   or {})
+        local nameCount = buildAnchorNameCount(auraList, cdList)
+        local items = {
+            { label = "UIParent",  value = "UIParent"   },
+            { label = "(custom)",  value = "__custom__" },
+        }
+        local function add(rec, suffix)
+            local label = (nameCount[rec.name] or 0) > 1 and (rec.name .. " " .. suffix) or rec.name
+            items[#items + 1] = { label = label, value = rec.entry._lecSpellID }
+        end
+        for _, rec in ipairs(auraList) do add(rec, "(Aura)") end
+        for _, rec in ipairs(cdList)   do add(rec, "(CD)")   end
+        table.sort(items, function(a, b)
+            if a.value == "UIParent"   then return true  end
+            if b.value == "UIParent"   then return false end
+            if a.value == "__custom__" then return true  end
+            if b.value == "__custom__" then return false end
+            return tostring(a.label) < tostring(b.label)
+        end)
+        s:Open(items, function(v, l)
+            local wasCustom = bc.anchorCustom == true
+            if v == "__custom__" then
+                bc.anchorCustom = true; bc.anchorFrame = ""
+            elseif v == "UIParent" then
+                bc.anchorCustom = nil; bc.anchorFrame = "UIParent"
+            else
+                bc.anchorCustom = nil; bc.anchorFrame = v
+            end
+            anc:SetValue(l)
+            RefreshAll(); refreshPreview()
+            if BuildSubmoduleList and (bc.anchorCustom == true) ~= wasCustom then
+                BuildSubmoduleList()
+            end
+        end)
+    end)
+    y = y - 30
+
+    pointDropdown("Source Point",
+        function() return bc.point end, function(v) bc.point = v end, "CENTER")
+    pointDropdown("Dest Point",
+        function() return bc.relativePoint end, function(v) bc.relativePoint = v end, "CENTER")
+    numRow("X Offset",
+        function() return bc.x end, function(v) bc.x = v end, 0)
+    numRow("Y Offset",
+        function() return bc.y end, function(v) bc.y = v end, 0)
+
+    local STRATA_LIST = {
+        "BACKGROUND", "LOW", "MEDIUM", "HIGH",
+        "DIALOG", "FULLSCREEN", "FULLSCREEN_DIALOG", "TOOLTIP",
+    }
+    Row(p, y, "Strata")
+    local strataDD = MakeDropdown(p, 180, 22)
+    strataDD:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    strataDD:SetValue(bc.strata or "HIGH")
+    strataDD:SetScript("OnClick", function(s)
+        local items = {}
+        for _, st in ipairs(STRATA_LIST) do items[#items + 1] = { label = st, value = st } end
+        s:Open(items, function(v, l)
+            bc.strata = v; strataDD:SetValue(l)
+            RefreshAll(); refreshPreview()
+        end)
+    end)
+    y = y - 30
+
+    -- ---- Expiring ----
+    SectionHeader("Expiring")
+    -- Top-level toggle: enables/disables the bar color flip when expiring.
+    -- Defaults truthy (nil read as enabled) so existing bars keep prior behavior.
+    Row(p, y, "Enabled")
+    local expEn = MakeCheck(p)
+    expEn:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    expEn:SetChecked(bc.useExpiringColor ~= false)
+    expEn.onChanged = function(v) bc.useExpiringColor = (v and nil or false); RefreshAll(); refreshPreview() end
+    y = y - 30
+    numRow("Threshold (s)",
+        function() return bc.expireAt end, function(v) bc.expireAt = v end, 3)
+    bc.barExpiringColor = bc.barExpiringColor or {1, 0, 0, 1}
+    colorRow("Bar Color",
+        function() return bc.barExpiringColor end, function(v) bc.barExpiringColor = v end)
+
+    -- "Enabled" rows for nested text configs: field.enabled defaults truthy
+    -- (visible). nil = enabled; false = disabled. checkRow writes nil/true so
+    -- we need a small variant that writes false instead of nil on uncheck.
+    local function boolRowInverted(label, field)
+        Row(p, y, label)
+        local c = MakeCheck(p)
+        c:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        c:SetChecked(field.enabled ~= false)
+        c.onChanged = function(v) field.enabled = (v and nil or false); RefreshAll(); refreshPreview() end
+        y = y - 30
+    end
+
+    -- Per-text point/relativePoint/offset rows, plus the existing rows.
+    local function textPositionRows(tcfg, defPoint, defRel, defX)
+        Row(p, y, "Source Point")
+        local sp = MakeDropdown(p, 140, 22)
+        sp:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        sp:SetValue(tcfg.point or defPoint)
+        sp:SetScript("OnClick", function(s)
+            local items = {}
+            for _, pt in ipairs(ANCHOR_POINTS) do items[#items + 1] = { label = pt, value = pt } end
+            s:Open(items, function(v) tcfg.point = v; sp:SetValue(v); RefreshAll(); refreshPreview() end)
+        end)
+        y = y - 30
+
+        Row(p, y, "Dest Point")
+        local dp = MakeDropdown(p, 140, 22)
+        dp:SetPoint("TOPLEFT", PAD + 108, y + 4)
+        dp:SetValue(tcfg.relativePoint or defRel)
+        dp:SetScript("OnClick", function(s)
+            local items = {}
+            for _, pt in ipairs(ANCHOR_POINTS) do items[#items + 1] = { label = pt, value = pt } end
+            s:Open(items, function(v) tcfg.relativePoint = v; dp:SetValue(v); RefreshAll(); refreshPreview() end)
+        end)
+        y = y - 30
+
+        numRow("X Offset", function() return tcfg.x end, function(v) tcfg.x = v end, defX)
+        numRow("Y Offset", function() return tcfg.y end, function(v) tcfg.y = v end, 0)
+    end
+
+    -- ---- Spell Name Text ----
+    SectionHeader("Spell Name Text")
+    boolRowInverted("Enabled", bc.nameText)
+    lsmDropdown("Font", "font",
+        function() return bc.nameText.font end, function(v) bc.nameText.font = v end, true)
+    numRow("Size",
+        function() return bc.nameText.fontSize end, function(v) bc.nameText.fontSize = v end, 12)
+    bc.nameText.color = bc.nameText.color or {1, 1, 1, 1}
+    colorRow("Color",
+        function() return bc.nameText.color end, function(v) bc.nameText.color = v end)
+    textPositionRows(bc.nameText, "LEFT", "LEFT", 4)
+    checkRow("Use Expiring",
+        function() return bc.nameText.useExpiringColor end,
+        function(v) bc.nameText.useExpiringColor = v end)
+    bc.nameText.expiringColor = bc.nameText.expiringColor or {1, 0, 0, 1}
+    colorRow("Expiring Color",
+        function() return bc.nameText.expiringColor end, function(v) bc.nameText.expiringColor = v end)
+
+    -- ---- Duration Text ----
+    SectionHeader("Duration Text")
+    boolRowInverted("Enabled", bc.durText)
+    lsmDropdown("Font", "font",
+        function() return bc.durText.font end, function(v) bc.durText.font = v end, true)
+    numRow("Size",
+        function() return bc.durText.fontSize end, function(v) bc.durText.fontSize = v end, 12)
+    bc.durText.color = bc.durText.color or {1, 1, 1, 1}
+    colorRow("Color",
+        function() return bc.durText.color end, function(v) bc.durText.color = v end)
+    textPositionRows(bc.durText, "RIGHT", "RIGHT", -4)
+
+    -- Decimals shown when remaining is under 60s (0 = whole seconds,
+    -- 1 = one decimal, 2 = two decimals). >60s always renders as m:ss.
+    Row(p, y, "Decimals")
+    local decDD = MakeDropdown(p, 80, 22)
+    decDD:SetPoint("TOPLEFT", PAD + 108, y + 4)
+    decDD:SetValue(tostring(bc.durText.decimals or 1))
+    decDD:SetScript("OnClick", function(s)
+        local items = {
+            { label = "0", value = 0 },
+            { label = "1", value = 1 },
+            { label = "2", value = 2 },
+        }
+        s:Open(items, function(v, l)
+            bc.durText.decimals = v
+            decDD:SetValue(l)
+            RefreshAll(); refreshPreview()
+        end)
+    end)
+    y = y - 30
+
+    checkRow("Use Expiring",
+        function() return bc.durText.useExpiringColor end,
+        function(v) bc.durText.useExpiringColor = v end)
+    bc.durText.expiringColor = bc.durText.expiringColor or {1, 0, 0, 1}
+    colorRow("Expiring Color",
+        function() return bc.durText.expiringColor end, function(v) bc.durText.expiringColor = v end)
+
+    y = AppendDeleteButton(p, y, "Bar", item, uid)
+    p:SetHeight(-y + PAD)
+    return p
+end
+
+-- -------------------------------------------------- --
 --  Right panel — sub-module accordion                --
 -- -------------------------------------------------- --
 
@@ -1230,6 +1809,17 @@ function BuildSubmoduleList()
             end)
         end)
 
+        local dup = MakeButton(row, "Dup", 32, 18)
+        dup:SetPoint("RIGHT", del, "LEFT", -4, 0)
+        dup:SetScript("OnClick", function()
+            local newUID = DuplicateSubmodule(item, kind, uid)
+            if newUID then
+                expandedUID = newUID
+                RefreshAll()
+                BuildSubmoduleList()
+            end
+        end)
+
         row:SetScript("OnClick", function()
             if expandedUID == uid then expandedUID = nil else expandedUID = uid end
             BuildSubmoduleList()
@@ -1244,6 +1834,7 @@ function BuildSubmoduleList()
             if kind == "Sound" then panel = CreateSoundPanel(subContent, sc, item, uid) end
             if kind == "Event" then panel = CreateEventPanel(subContent, sc, item, uid) end
             if kind == "Text"  then panel = CreateTextPanel(subContent, sc, uid, spellID, item) end
+            if kind == "Bar"   then panel = CreateBarPanel(subContent, sc, uid, spellID, item)  end
             panel:SetPoint("TOPLEFT", 0, yOff)
             panel:SetPoint("TOPRIGHT", 0, yOff)
             table.insert(subPanels, panel)
@@ -1262,6 +1853,9 @@ function BuildSubmoduleList()
     end
     if item.texts then
         for uid, tc in pairs(item.texts) do AddSubRow("Text", uid, tc) end
+    end
+    if item.bars then
+        for uid, bc in pairs(item.bars) do AddSubRow("Bar", uid, bc) end
     end
 
     subContent:SetHeight(math.max(1, -yOff + 10))
@@ -1319,6 +1913,62 @@ local function AddSubmodule(kind)
             fontSize      = 18,
             fontOutline   = "OUTLINE",
             rgba          = {1, 1, 1, 1},
+        }
+    elseif kind == "Bar" then
+        item.bars = item.bars or {}
+        item.bars[uid] = {
+            name             = "Aura Bar",
+            enabled          = true,
+            -- Bar
+            width            = 200,
+            height           = 20,
+            barTexture       = nil,                 -- LSM default
+            barColor         = {0.2, 0.8, 0.2, 1},
+            -- Background
+            bgTexture        = nil,
+            bgColor          = {0, 0, 0, 0.7},
+            -- Border
+            borderThickness  = 1,
+            borderColor      = {0, 0, 0, 1},
+            -- Anchor
+            anchorFrame      = "UIParent",
+            point            = "CENTER",
+            relativePoint    = "CENTER",
+            x                = 0,
+            y                = 0,
+            strata           = "HIGH",
+            -- Expiring
+            useExpiringColor = true,
+            expireAt         = 3,
+            barExpiringColor = {1, 0.2, 0.2, 1},
+            -- Texts
+            nameText = {
+                enabled          = true,
+                font             = nil,
+                fontSize         = 12,
+                fontOutline      = "OUTLINE",
+                color            = {1, 1, 1, 1},
+                point            = "LEFT",
+                relativePoint    = "LEFT",
+                x                = 4,
+                y                = 0,
+                useExpiringColor = false,
+                expiringColor    = {1, 0.4, 0.4, 1},
+            },
+            durText = {
+                enabled          = true,
+                font             = nil,
+                fontSize         = 12,
+                fontOutline      = "OUTLINE",
+                color            = {1, 1, 1, 1},
+                point            = "RIGHT",
+                relativePoint    = "RIGHT",
+                x                = -4,
+                y                = 0,
+                decimals         = 1,
+                useExpiringColor = false,
+                expiringColor    = {1, 0.4, 0.4, 1},
+            },
         }
     end
 
@@ -1567,6 +2217,22 @@ local function BuildFrame()
     close:SetPoint("RIGHT", -4, 0)
     close:SetScript("OnClick", function() frame:Hide() end)
 
+    -- Quick-launcher for the Blizzard Cooldown Manager settings panel.
+    -- CDM is a load-on-demand addon — load it first so CooldownViewerSettings
+    -- is guaranteed to exist before we toggle.
+    local openCDM = MakeButton(title, "Open CDM", 90, 20)
+    openCDM:SetPoint("RIGHT", close, "LEFT", -6, 0)
+    openCDM:SetScript("OnClick", function()
+        if C_AddOns and C_AddOns.LoadAddOn then
+            C_AddOns.LoadAddOn("Blizzard_CooldownViewer")
+        end
+        if CooldownViewerSettings and CooldownViewerSettings.TogglePanel then
+            CooldownViewerSettings:TogglePanel()
+        else
+            ns.lpmsg("CDM settings panel not available (Blizzard_CooldownViewer load failed)")
+        end
+    end)
+
     -- Spec bar
     specBar = MakePanel(frame, C_PANEL, C_BDR)
     specBar:SetPoint("TOPLEFT", 0, -TITLE_H)
@@ -1644,11 +2310,15 @@ local function BuildFrame()
     -- Text sub-module is aura-only (displays stack count). Hidden on CD items.
     local addText  = MakeAccentButton(rightHeader, "+Text",  60, 22)
     addText:SetPoint("LEFT", addEvent, "RIGHT", 6, 0)
+    -- Bar sub-module is also aura-only (duration progress bar).
+    local addBar   = MakeAccentButton(rightHeader, "+Bar",   54, 22)
+    addBar:SetPoint("LEFT", addText, "RIGHT", 6, 0)
 
     addGlow:SetScript("OnClick",  function() AddSubmodule("Glow")  end)
     addSound:SetScript("OnClick", function() AddSubmodule("Sound") end)
     addEvent:SetScript("OnClick", function() AddSubmodule("Event") end)
     addText:SetScript("OnClick",  function() AddSubmodule("Text")  end)
+    addBar:SetScript("OnClick",   function() AddSubmodule("Bar")   end)
 
     enCheck.onChanged = function(v)
         if not selectedKey then return end
@@ -1674,8 +2344,12 @@ local function BuildFrame()
         end
         enCheck:SetChecked(has)
 
-        -- +Text only makes sense for auras (stack count). Hide on CDs.
-        if selectedCat == "auras" then addText:Show() else addText:Hide() end
+        -- +Text and +Bar only make sense for auras. Hide on CDs.
+        if selectedCat == "auras" then
+            addText:Show(); addBar:Show()
+        else
+            addText:Hide(); addBar:Hide()
+        end
     end
 
     subScroll = CreateFrame("ScrollFrame", nil, rightPanel, "UIPanelScrollFrameTemplate")
@@ -1709,14 +2383,25 @@ end
 local combatQueueFrame = CreateFrame("Frame")
 local pendingAction  -- "open" | "toggle" | nil
 
+-- Rebuild the spell/aura maps before showing the settings UI so that
+-- talent-driven changes always land — belt-and-suspenders in case any of the
+-- talent/spec/spell-change events were missed (e.g. fired before LECDM was
+-- listening, or coalesced away). Cheap to rebuild and only runs at open time.
+local function RefreshMapsBeforeShow()
+    if ns.BuildSpellMap then ns.BuildSpellMap() end
+    if ns.BuildAuraMap  then ns.BuildAuraMap()  end
+    if ns.AuraTracker and ns.AuraTracker.SeedFrames then ns.AuraTracker:SeedFrames() end
+end
+
 local function FlushPendingAction()
     local action = pendingAction
     pendingAction = nil
     if action == "open" then
+        RefreshMapsBeforeShow()
         BuildFrame():Show()
     elseif action == "toggle" then
         local f = BuildFrame()
-        if f:IsShown() then f:Hide() else f:Show() end
+        if f:IsShown() then f:Hide() else RefreshMapsBeforeShow(); f:Show() end
     end
 end
 
@@ -1734,10 +2419,11 @@ local function DeferOrRunNow(action)
     else
         pendingAction = nil
         if action == "open" then
+            RefreshMapsBeforeShow()
             BuildFrame():Show()
         elseif action == "toggle" then
             local f = BuildFrame()
-            if f:IsShown() then f:Hide() else f:Show() end
+            if f:IsShown() then f:Hide() else RefreshMapsBeforeShow(); f:Show() end
         end
     end
 end

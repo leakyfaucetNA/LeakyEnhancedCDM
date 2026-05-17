@@ -14,10 +14,12 @@ embeds.xml
 modules\maps.lua
 modules\auras.lua
 modules\cooldowns.lua
+modules\charges.lua
 modules\events.lua
 modules\glows.lua
 modules\sounds.lua
 modules\texts.lua
+modules\bars.lua
 
 # Settings
 settings\settings.lua

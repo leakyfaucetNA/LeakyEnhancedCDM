@@ -188,7 +188,15 @@ eventFrame:SetScript("OnEvent", function(_, event, unit, info)
     if event ~= "UNIT_AURA" then return end
     if not trackedUnits[unit] then return end
 
-    if not info or info.isFullUpdate then
+    -- info.isFullUpdate is a SECRET VALUE in 12.0+ (per TwintopInsanityBar's
+    -- handler at Functions/Aura.lua:80). Branching on it directly taints
+    -- execution. Guard with issecretvalue and treat the secret case as "not
+    -- full update" — the addedAuras / updatedAuraInstanceIDs / removedAura-
+    -- InstanceIDs payloads below still drive the normal reconciliation path,
+    -- so we don't lose state when we skip the snapshot pass.
+    local isFull = info and info.isFullUpdate
+    if issecretvalue and issecretvalue(isFull) then isFull = false end
+    if not info or isFull then
         local updateTime = GetTime()
         local unitDB = ns.aurasDB[unit]
         local snapshot = {}

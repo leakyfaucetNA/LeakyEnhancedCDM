@@ -1,0 +1,23 @@
+## Interface: 120000, 120001, 120005
+## Title: Leaky EnhancedAnchors
+## Notes: Frame anchoring + custom event triggers.
+## Author: Leaky-BleedingHollow
+## Version: 0.1.0
+## SavedVariables: LEANCdb
+## OptionalDeps: Ace3, LibSharedMedia-3.0
+
+# Libraries
+embeds.xml
+
+
+# Modules
+modules\utils.lua
+modules\loadconditions.lua
+modules\anchors.lua
+modules\customevents.lua
+
+# Settings
+settings\settings.lua
+
+# Core
+main.lua

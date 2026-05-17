@@ -362,6 +362,8 @@ local INVERSE_TRIGGERS = { onRemove = true, onUsed = true }
 
 local function ProcessGlowTrigger(item, spellID, isActive)
     if type(item.glows) == "table" then
+        local isCD = item.type == "cdTrigger"
+        local inCombat = InCombatLockdown()
         for uid, gc in pairs(item.glows) do
             if gc.enabled ~= false then
                 -- frameKey=nil means "use this spell's own frame" (the default
@@ -370,7 +372,25 @@ local function ProcessGlowTrigger(item, spellID, isActive)
                 local target = ResolveGlowTarget(gc.frameKey or spellID)
                 if target then
                     local inverse = INVERSE_TRIGGERS[gc.triggerOn] == true
-                    local shouldGlow = ComputeShouldGlow(true, gc.preview or false, inverse, isActive)
+                    local isPreview = gc.preview or false
+                    local effectiveActive = isActive
+                    -- "Only at full charges" gate. Applies only to cdTrigger
+                    -- items; aura applications are secret in 12.0+ so we can't
+                    -- detect full stacks reliably (toggle hidden in UI).
+                    if effectiveActive and isCD and gc.triggerAtFull then
+                        effectiveActive = ns.ChargeTracker:IsAtFull(spellID)
+                    end
+                    local shouldGlow = ComputeShouldGlow(true, isPreview, inverse, effectiveActive)
+                    -- "Only in Combat" gate. Applied to the final shouldGlow
+                    -- (not to effectiveActive) so inverse triggers like
+                    -- "aura not active" / "CD used" — which glow when
+                    -- effectiveActive is false — also get suppressed out of
+                    -- combat. Preview still glows so the editor can show it.
+                    -- Re-evaluation on combat-state transitions is driven by
+                    -- PLAYER_REGEN_* in SetupGlows.
+                    if shouldGlow and gc.combatOnly and not inCombat and not isPreview then
+                        shouldGlow = false
+                    end
                     gc.spellID  = spellID
                     gc.safeGlow = true  -- CDM frames always need UIParent overlay
                     gc.key      = uid   -- use UID as the LCG key so instances don't collide
@@ -469,12 +489,38 @@ local function IsItemActive(item, spellID)
     return not ns.cdStateDB[spellID]
 end
 
+-- Charge fullness changed — re-evaluate any glows for this spell. We don't
+-- need to flip pendingChanges' active flag; ProcessGlowTrigger will read the
+-- live ChargeTracker state on its next pass.
+local function OnChargesFullChanged(spellID)
+    local items = activeItemLookup[spellID]
+    if not items then return end
+    for _, item in pairs(items) do
+        if item.type == "cdTrigger" then
+            pendingChanges[spellID] = IsItemActive(item, spellID)
+            scheduleProcess()
+            return
+        end
+    end
+end
+
+-- PLAYER_REGEN_* drives "Only in Combat" gate transitions. Always-on rather
+-- than gated on the presence of a combatOnly config — these events fire only
+-- on combat enter/exit so the cost is negligible.
+local combatStateFrame = CreateFrame("Frame")
+combatStateFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+combatStateFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+combatStateFrame:SetScript("OnEvent", function()
+    if ns.RefreshAllGlows then ns.RefreshAllGlows() end
+end)
+
 function ns.HardResetAllGlows()
     ns.lpmsg("Lifecycle: HardResetAllGlows", "DEBUG")
     ns.AuraTracker:Off("LEC_AURA_ADDED",   "glows")
     ns.AuraTracker:Off("LEC_AURA_REMOVED", "glows")
     ns.CDTracker:Off("LEC_CD_USED",  "glows")
     ns.CDTracker:Off("LEC_CD_READY", "glows")
+    if ns.ChargeTracker then ns.ChargeTracker:Off("LEC_CHARGES_FULL_CHANGED", "glows") end
 
     for frame in pairs(ns.FrameRegistry) do
         if frame then ns.StopAllLcgTypes(frame, nil) end
@@ -504,6 +550,7 @@ function ns.SetupGlows(addon)
     ns.AuraTracker:On("LEC_AURA_REMOVED", "glows", OnAuraRemoved)
     ns.CDTracker:On("LEC_CD_USED",  "glows", OnCDUsed)
     ns.CDTracker:On("LEC_CD_READY", "glows", OnCDReady)
+    ns.ChargeTracker:On("LEC_CHARGES_FULL_CHANGED", "glows", OnChargesFullChanged)
 
     ns.RefreshAllGlows()
     ns.lpmsg("Lifecycle: SetupGlows done", "DEBUG")

@@ -141,16 +141,18 @@ local function EnsureTextFrame(stateKey, tc)
     fs:ClearAllPoints()
     fs:SetPoint("CENTER", container, "CENTER", 0, 0)
 
-    -- Font: prefer an LSM-registered font by name, fall back to whatever the
-    -- FontString inherited from its font object.
+    -- Font: prefer an LSM-registered font by name, fall back to the standard
+    -- shipped font. Don't trust fs:GetFont() for the fallback — for FontStrings
+    -- created from a font template (GameFontNormalLarge), GetFont can return
+    -- nil because the actual font lives on the inherited FontObject, not the
+    -- string itself. That nil short-circuited SetFont entirely, which is why
+    -- in-panel size/face edits silently did nothing.
     local fontPath
     if tc.font and LSM then
         fontPath = LSM:Fetch("font", tc.font)
     end
-    if not fontPath then fontPath = fs:GetFont() end
-    if fontPath then
-        fs:SetFont(fontPath, tc.fontSize or 18, tc.fontOutline or "OUTLINE")
-    end
+    if not fontPath then fontPath = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF" end
+    fs:SetFont(fontPath, tc.fontSize or 18, tc.fontOutline or "OUTLINE")
 
     local rgba = tc.rgba or {1, 1, 1, 1}
     fs:SetTextColor(rgba[1] or 1, rgba[2] or 1, rgba[3] or 1, rgba[4] or 1)

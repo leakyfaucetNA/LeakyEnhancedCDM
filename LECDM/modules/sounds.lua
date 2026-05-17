@@ -86,6 +86,14 @@ end
 --  Trigger Dispatch                                  --
 -- -------------------------------------------------- --
 
+-- "Only at Full Charges" gate — toggle is UI-restricted to cdTrigger items
+-- because aura applications are secret. Defensive type check anyway.
+local function GatePassed(item, sc, spellID)
+    if not sc.triggerAtFull then return true end
+    if item.type ~= "cdTrigger" then return true end
+    return ns.ChargeTracker and ns.ChargeTracker:IsAtFull(spellID)
+end
+
 -- item.sounds = { [uid] = { name, enabled, triggerOn, soundName, channel, repeatMode, ... } }
 local function ProcessSound(spellID, triggerKey)
     local items = soundItemLookup[spellID]
@@ -93,7 +101,8 @@ local function ProcessSound(spellID, triggerKey)
     for itemID, item in pairs(items) do
         if type(item.sounds) == "table" then
             for uid, sc in pairs(item.sounds) do
-                if sc.triggerOn == triggerKey and sc.enabled ~= false and sc.soundName then
+                if sc.triggerOn == triggerKey and sc.enabled ~= false and sc.soundName
+                   and GatePassed(item, sc, spellID) then
                     local stateKey = tostring(spellID) .. "_" .. itemID .. "_" .. uid
                     StartSound(stateKey, sc)
                 end
@@ -148,6 +157,34 @@ local function OnCDUsed(spellID)
 end
 
 -- -------------------------------------------------- --
+--  ChargeTracker Callbacks                           --
+-- -------------------------------------------------- --
+
+-- When the spell flips into/out of "full charges", any triggerAtFull-gated
+-- sound config matching the spell's current state (ready vs. used) starts
+-- or stops. cdStateDB is the source of truth for ready/used (truthy = used).
+local function OnChargesFullChanged(spellID, isAtFull)
+    local items = soundItemLookup[spellID]
+    if not items then return end
+    local currentTriggerKey = (ns.cdStateDB and ns.cdStateDB[spellID]) and "onUsed" or "onReady"
+    for itemID, item in pairs(items) do
+        if item.type == "cdTrigger" and type(item.sounds) == "table" then
+            for uid, sc in pairs(item.sounds) do
+                if sc.triggerAtFull and sc.triggerOn == currentTriggerKey
+                   and sc.enabled ~= false and sc.soundName then
+                    local stateKey = tostring(spellID) .. "_" .. itemID .. "_" .. uid
+                    if isAtFull then
+                        StartSound(stateKey, sc)
+                    else
+                        StopRepeat(stateKey)
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- -------------------------------------------------- --
 --  Setup / Teardown                                  --
 -- -------------------------------------------------- --
 
@@ -179,6 +216,7 @@ function ns.SetupSounds(addon)
     ns.AuraTracker:On("LEC_AURA_REMOVED", "sounds", OnAuraRemoved)
     ns.CDTracker:On("LEC_CD_READY", "sounds", OnCDReady)
     ns.CDTracker:On("LEC_CD_USED",  "sounds", OnCDUsed)
+    ns.ChargeTracker:On("LEC_CHARGES_FULL_CHANGED", "sounds", OnChargesFullChanged)
     ns.lpmsg("Lifecycle: SetupSounds done", "DEBUG")
 end
 
@@ -187,6 +225,7 @@ function ns.StopAllSounds()
     ns.AuraTracker:Off("LEC_AURA_REMOVED", "sounds")
     ns.CDTracker:Off("LEC_CD_READY", "sounds")
     ns.CDTracker:Off("LEC_CD_USED",  "sounds")
+    if ns.ChargeTracker then ns.ChargeTracker:Off("LEC_CHARGES_FULL_CHANGED", "sounds") end
     for stateKey in pairs(soundState) do
         StopRepeat(stateKey)
     end
